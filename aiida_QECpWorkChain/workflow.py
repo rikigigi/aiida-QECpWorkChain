@@ -5,6 +5,7 @@ import aiida.orm
 from aiida.orm import Int, Float, Str, List, Dict
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
+from aiida.plugins.factories import DataFactory
 import numpy as np
 
 
@@ -14,7 +15,7 @@ import numpy as np
 def dict_keys(d,level=0):
     #print (d,level)
     if level==0:
-        return d.keys()
+        return list(d.keys())
     elif level>0: return dict_keys(d[list(d.keys())[0]],level-1)
     else: raise ValueError('level cannot be negative ({})'.format(level))
 
@@ -189,7 +190,10 @@ def configure_cp_builder_cg(code,
 def get_resources(calc):
     start_from=get_node(calc)
     options=start_from.get_options()
-    return options['resources'], options['queue_name'], options['max_wallclock_seconds']
+    if 'account' in options:
+        return options['resources'], options['queue_name'], options['max_wallclock_seconds'], options['account']
+    else:
+        return options['resources'], options['queue_name'], options['max_wallclock_seconds'], None
 
 def configure_cp_builder_restart(code,
                                     start_from,
@@ -214,13 +218,17 @@ def configure_cp_builder_restart(code,
     or during this function call.
     '''
     start_from = get_node(start_from)
+    builder=code.get_builder()
     if resources is not None:
         resources_=resources['resources']
         queue=     resources['queue']
         wallclock= resources['wallclock']
+        if 'account' in resources:
+            builder.metadata.options.account = resources['account']
     else: #get resources from old calculation
-        resources_,queue,wallclock=get_resources(start_from)
-    builder=code.get_builder()
+        resources_,queue,wallclock, account=get_resources(start_from)
+        if account is not None:
+            builder.metadata.options.account = account
     #note that the structure will not be used (he has the restart)
     builder.structure = start_from.inputs.structure
     builder.parent_folder = start_from.outputs.remote_folder
@@ -389,7 +397,7 @@ def compare_forces_many(submitted):
     '''
     atom_forces={}
     for sub in submitted:
-        if sub.is_finished_ok:
+        if sub.is_finished_ok or sub.exit_status == 322 :
             list_ratios, emass, pk, dt = compare_forces(sub)
             atom=atom_forces.setdefault(emass,{}).setdefault(dt,{'fratios':{},'forces':{}})['fratios']
             forces=atom_forces.setdefault(emass,{}).setdefault(dt,{'fratios':{},'forces':{}})['forces']
@@ -397,6 +405,8 @@ def compare_forces_many(submitted):
             for element in list_ratios:
                 atom.setdefault(element[0],[]).append(element[2])
                 forces.setdefault(element[0],[]).append(element[1])
+        else:
+            print(sub.pk,'failed')
     #print(atom_forces)
     for emass_af in atom_forces.keys():
         for dt in atom_forces[emass_af].keys():
@@ -456,8 +466,8 @@ def get_maximum_frequency_vdos(traj):
     vel=traj.get_array('velocities')
     times=traj.get_array('times')
     vdos=np.abs(np.fft.fft(vel,axis=0)).mean(axis=1).mean(axis=1)
-    idx=np.argmax(vdox)
-    return Float(np.fft.fftfreq(vel.shape[0],times[-1]-times[-2]))
+    idx=np.argmax(vdos)
+    return Float(np.fft.fftfreq(vel.shape[0],times[-1]-times[-2])[idx])
 
 def get_structures_from_trajectory(traj,every=1):
     structures=[]
@@ -502,21 +512,14 @@ def generate_pw_from_trajectory(pwcode, start_from,
             'CONTROL' : {
                 'calculation': 'scf' ,
                 'restart_mode' : 'from_scratch',
-                'tstress': True ,
+                'tstress': True,
                 'tprnfor': True,
+               # 'disk_io': 'none',
             },
             'SYSTEM' : {
                 'ecutwfc': start_from.inputs.parameters.get_dict()['SYSTEM']['ecutwfc'],
-                #'nr1b' : nrb[0],  #ask pietro
-                #'nr2b' : nrb[1],
-                #'nr3b' : nrb[2],
             },
             'ELECTRONS' : {
-                 #'emass': 25,
-                 #'orthogonalization' : 'ortho',
-                 #'electron_dynamics' : 'verlet',
-                 #'orthogonalization' : 'Gram-Schmidt',
-                 #'electron_dynamics' : 'cg',
             },
         }
         builder.settings = Dict(dict={'gamma_only': True})
@@ -525,8 +528,12 @@ def generate_pw_from_trajectory(pwcode, start_from,
             builder.metadata.options.resources = resources['resources']
             builder.metadata.options.max_wallclock_seconds = resources['wallclock']
             builder.metadata.options.queue_name = resources['queue']
+            if 'account' in resources:
+                builder.metadata.options.account=resources['account']
         else:
-            builder.metadata.options.resources,builder.metadata.options.max_wallclock_seconds,builder.metadata.options.queue_name=get_resources(start_from)
+            builder.metadata.options.resources,builder.metadata.options.queue_name,builder.metadata.options.max_wallclock_seconds,account=get_resources(start_from)
+            if account is not None:
+                builder.metadata.options.account=account
         
         builders.append(builder)
     return builders
@@ -552,6 +559,17 @@ def get_parent_calc_from_emass_dt(res,emass,dt):
         raise RuntimeError('Bug: wrong logic')
     return startfrom
 
+def load_nodes(pks):
+    res=[] 
+    for pk in pks:
+        res.append(aiida.orm.load_node(pk))
+    return res
+
+
+
+def fake_function(*args,**kwargs):
+    print(args,kwargs)
+    return
 
 class CpWorkChain(WorkChain):
     @classmethod
@@ -569,6 +587,9 @@ class CpWorkChain(WorkChain):
         spec.input('cp_resources_cg_list',valid_type=(List),required=True)
         spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None )
         spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}))
+        spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]))
+        spec.input('emass_start_stop_step_mul', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
+        spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100))
         spec.outline(
             cls.setup,
             cls.small_equilibration_cg,
@@ -590,6 +611,7 @@ class CpWorkChain(WorkChain):
         spec.exit_code(402, 'ERROR_NOSE_FAILED', message='Nose-Hoover thermostat failed.')
         spec.exit_code(403, 'ERROR_FINAL_CG_FAILED', message='Final cg after Nose-Hoover failed.')
         spec.exit_code(404, 'ERROR_NVE_FAILED', message='Error in the NVE simulation')
+        spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating veri expensive random numbers. There is something wrong (cutoff? metal? boo?)')
         spec.output('result')
 
     def emass_dt_not_ok(self):
@@ -661,7 +683,8 @@ class CpWorkChain(WorkChain):
 
         #prepare multiple
         params=self.get_cp_resources_cp()
-        for mu in 25*np.arange(1,8)**2:
+        start,stop,step,fac=self.inputs.emass_start_stop_step_mul
+        for mu in fac*np.arange(start,stop,step)**2:
             key='emass_benchmark__{}'.format(mu)
             calc=configure_cp_builder_restart(
                                                self.get_cp_code(),
@@ -670,6 +693,7 @@ class CpWorkChain(WorkChain):
                                                resources=params
                                              )
             self.to_context(emass_benchmark=append_(self.submit(calc)))
+            self.report('[emass_benchmark] emass={} sent to context'.format(mu))
            
         #apply first correction of atomic mass
         return
@@ -679,24 +703,26 @@ class CpWorkChain(WorkChain):
         for calc in self.ctx.emass_benchmark:
             mu,dt,pk=get_emass_dt_pk( calc) 
             if calc.is_finished_ok:
-                for dt in np.arange(4.0,16.0, 2.0):
-                    self.report('trying calculation with emass={} dt={}'.format(mu,dt))
+                for dt in np.arange(*self.inputs.dt_start_stop_step):
+                    self.report('[dt_benchmark] trying calculation with emass={} dt={}'.format(mu,dt))
                     newcalc=configure_cp_builder_restart(
                                                    self.get_cp_code(),
                                                    calc,
                                                    resources=params,
-                                                   copy_mu_mucut=True
+                                                   copy_mu_mucut=True,
+                                                   dt=dt
                                                    )
                     self.to_context(dt_benchmark=append_(self.submit(newcalc)))
             else:
-                self.report('calculation with pk={} emass={} dt={} failed'.format(pk,mu,dt))
+                self.report('[dt_benchmark] calculation with pk={} emass={} dt={} failed'.format(pk,mu,dt))
 
         return
 
     def compare_forces_pw(self):
-        pwcode=get_pw_code()
+        pwcode=self.get_pw_code()
         joblist=[]
         for calc in self.ctx.dt_benchmark:
+            emass,dt,pk=get_emass_dt_pk(calc)
             if calc.is_finished_ok:
                 children_calc=get_children_calculation(calc.get_outgoing().all_nodes())
                 if len(children_calc)>0:  #maybe I calculated this stuff before
@@ -706,45 +732,75 @@ class CpWorkChain(WorkChain):
                             pwcont = pwcont + 1
                     if pwcont > 0:
                         break
-                emass,dt,pk=get_emass_dt_pk(calc)
-                self.report('comparing forces with PW for calc with pk={} emass={} dt={}'.format(pk,emass,dt))
+                self.report('[compare_forces_pw] comparing forces with PW for calc with pk={} emass={} dt={}'.format(pk,emass,dt))
                 joblist=joblist+generate_pw_from_trajectory(
                                         pwcode,
                                         calc,
-                                        numcalc=100         
+                                        numcalc=int(self.inputs.number_of_pw_per_trajectory)
                                     )
             else:
-                self.report('calculation with pk={} emass={} dt={} failed'.format(pk,emass,dt))
+                self.report('[compare_forces_pw] calculation with pk={} emass={} dt={} failed'.format(pk,emass,dt))
         if len(joblist)==0:
             raise RuntimeError('What am I doing here?')
         for job in joblist:
             self.to_context(compare_pw=append_(self.submit(job)))
 
+
+
+
+    def test_analysis_step(self, test_dt_traj_pks, test_pw_calc_pks, target_force_ratio,cp_code,pw_code,cp_code_res,pw_code_res ):
+        #setup fake environment
+        set_fake_something(self,'ctx','dt_benchmark',load_nodes(test_dt_traj_pks))
+        set_fake_something(self,'ctx','compare_pw',load_nodes(test_pw_calc_pks))
+        set_fake_something(self,'ctx','current_cp_code',cp_code)
+        set_fake_something(self,'ctx','current_pw_code',pw_code)
+        set_fake_something(self,'ctx','current_cp_code_cp_resources',cp_code_res)
+        set_fake_something(self,'ctx','current_pw_code_resources',pw_code_res)
+        set_fake_something(self,'ctx','compare_pw',load_nodes(test_pw_calc_pks))
+        set_fake_something(self,'inputs', 'target_force_ratio', target_force_ratio)
+        set_fake_something(self,'report',None,lambda s,a: print(a))
+        set_fake_something(self,'to_context',None,fake_function) 
+        set_fake_something(self,'submit',None,fake_function) 
+        global append_
+        append_ = lambda a: a
+        return self.analysis_step()
+
+
     def analysis_step(self):
 
+        self.report('[analysis_step] beginnig')
+ 
         #calculate vibrational spectra to have nice nose frequencies. Simply pick the frequency of the maximum
         vdos_maxs={}
         for calc in self.ctx.dt_benchmark:
             if calc.is_finished_ok:
                 vdos_maxs[calc.pk]=get_maximum_frequency_vdos(calc.outputs.output_trajectory)
         self.ctx.vdos_maxs=vdos_maxs
-
+        self.report('[analysis_step] maximum of vibrational spectra: {}'.format(vdos_maxs))
         #analyze forces ratio
-
-        res_1 = analyze_forces_ratio(self.ctx.dt_benchmark)
+        self.report('[analysis_step] comparing {} pw...'.format(len(self.ctx.compare_pw)))
+        res_1 = analyze_forces_ratio(self.ctx.compare_pw)
+        target_force_ratio=float(self.inputs.target_force_ratio)
         
         fratio_threshold=0.05
 
         class RatioGoodness(Enum):
+            GARBAGE = -2
             TOO_SMALL = -1
             OK = 0
             TOO_BIG = 1
 
         def ratios_are_ok(emass,dt,res):
             diff=[]
+            val=[]
             for atom in dict_keys(res,level=2):
-                diff.append(res[emass][dt][atom]['fratios_mean'] - target_ratio)
+                val.append(res[emass][dt][atom]['fratios_mean'] - res[emass][dt][atom]['fratios_std'])
+                diff.append(res[emass][dt][atom]['fratios_mean'] - target_force_ratio)
             diff=np.array(diff)
+            val=np.array(val)
+            #if values are too near zero, this is garbage
+            if min(val) < 0:
+                return RatioGoodness.GARBAGE, min(val)
             if abs(diff.min()) < fratio_threshold: # ratios are ok
                 return RatioGoodness.OK, abs(diff.min())
             elif diff.min() < - fratio_threshold: # ratios are too small
@@ -756,17 +812,21 @@ class CpWorkChain(WorkChain):
         candidates=[]
         too_small_biggest_emass=0.0
         too_big_smallest_emass=float('inf')
+        have_garbage=False
         for emass in res_1.keys():
             for dt in res_1[emass].keys():
                 goodness, off =ratios_are_ok(emass,dt,res_1)
                 if goodness == RatioGoodness.OK:
                     candidates.append((dt,emass,off))
-                elif goodness == RatioGoodness.TOO_SMALL:
+                elif goodness == RatioGoodness.TOO_BIG:
                     if emass > too_small_biggest_emass:
                         too_small_biggest_emass = emass
-                elif goodness == RatioGoodness.TOO_BIG:
+                elif goodness == RatioGoodness.TOO_SMALL:
                     if emass < too_big_smallest_emass:
                         too_big_smallest_emass = emass
+                elif goodness == RatioGoodness.GARBAGE:
+                    self.report('[analysis_step] dt,emass={},{} is garbage ({})'.format(dt,emass,off))
+                    have_garbage=True
                 else:
                     raise RuntimeError('Bug: missing case')
 
@@ -789,9 +849,12 @@ class CpWorkChain(WorkChain):
                             )                                            
                     self.to_context(dt_benchmark=append_(self.submit(newcalc)))
                     have_something_to_do=True
+                    self.report('[analysis_step.try_to_fix]: trying new dt,emass={},{}'.format(dt,emass))
             return have_something_to_do
 
         if len(candidates) == 0 :
+            self.report('[analysis_step] no good candidates found. Try to fix')
+            self.report('[analysis_step] results are: {}'.format(str(res_1)))
             self.ctx.emass_dt_not_ok = False
             #generate new set of parameters and run new simulations.
             #No candidates are available for 4 possible reasons: 1) emass too big, 2) emass to low, 3) emasses both too big and too low,  4) no successful simulations.
@@ -801,9 +864,11 @@ class CpWorkChain(WorkChain):
             else: # if all non candidate simulations have a positive difference between the ratio and the desidered ratio, it means tha I had a too low emass. In all other cases            #loop over all simulations parameters
                 increase_emass= too_small_biggest_emass > 0.0
                 decrease_emass= too_big_smallest_emass < float('inf')
+                self.report('[analysis_step] too_small_biggest_emass,too_big_smallest_emass={},{}'.format(too_small_biggest_emass,too_big_smallest_emass))
             if decrease_emass and not increase_emass: # 1)
                 #1. I have to use smaller emass, or the smaller emasses did not have a small enought timestep
                 #find if there is a broken simulation with emass lower than the current minimum
+                self.report('[analysis_step] try to decrease emass')
                 if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ < too_big_smallest_emass and not calc_.is_finished_ok):
                     return # do it!
                 # pick something lower and run it again!
@@ -819,9 +884,11 @@ class CpWorkChain(WorkChain):
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
+                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
                 return #do it!
             elif increase_emass and decrease_emass: # case 3)
                 #check if there are failed simulations with emass in between the biggest too small and the lowest too big
+                self.report('[analysis_step] try to find emass in the middle')
                 if try_to_fix(test=lambda emass_,dt_,calc_ : emass_ > too_small_biggest_emass and emass_ < too_big_smallest_emass and not calc_.is_finished_ok):
                     return # do it!
                 # pick something in the middle and run it again!
@@ -838,9 +905,11 @@ class CpWorkChain(WorkChain):
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
+                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
                 return #do it!
             elif increase_emass: #case 2) emass is too low, I can increase it!
                 #check that simulations with higher emass are not failed
+                self.report('[analysis_step] try to increase emass')
                 if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ > too_small_biggest_emass and not calc_.is_finished_ok):
                     return # do it!
                 # pick something lower and run it again!
@@ -856,10 +925,14 @@ class CpWorkChain(WorkChain):
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
+                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
                 return #do it!
+            elif have_garbage:
+                return 405  
             else:
                 raise RuntimeError('Bug: wrong logic')
         else:  # we have candidate parameters ( len(candidates!=0) )
+            self.report('[analysis_step] good candidates found. Going on.')
             self.ctx.emass_dt_not_ok = False # to exit the loop in the workchain
             #pick the one with the highest dt and highest emass run it
             #(check force variances?)
@@ -869,11 +942,12 @@ class CpWorkChain(WorkChain):
                     best=candidate
             self.ctx.dt_emass_off=best
             self.ctx.force_ratios=res_1 # save the results
-
+            self.report('[analysis_step] best candidate dt,emass,off={}',best)
         return
 
     def nose(self):
         #find simulation to restart. take biggest pk of selected parameters
+        self.report('[nose] beginning.')
         dt,emass,off=self.ctx.dt_emass_off
         startfrom=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
         if not startfrom.is_finished_ok:
@@ -886,7 +960,7 @@ class CpWorkChain(WorkChain):
             'IONS': { 
                 'ion_temperature': 'nose',
                 'tempw': float(self.input.tempw),
-                'fnosep': self.ctx.vdos_maxs,
+                'fnosep': float(self.ctx.vdos_maxs),
                 'nhpcl' : 3,
             },
             'CELL': {
@@ -904,8 +978,7 @@ class CpWorkChain(WorkChain):
                 additional_parameters=nose_pr_param
              )                                       
         self.to_context(final_nose=self.submit(newcalc))       
- 
- 
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.input.tempw),float(self.ctx.vdos_maxs),float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
@@ -917,12 +990,13 @@ class CpWorkChain(WorkChain):
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
                    self.ctx.final_nose,
-                   resources=self.get_cp_resources_cp(),
+                   resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=True,
                    cg=True,
                    nstep=1
             )
         self.to_context(last_nve=append_(self.submit(final_cg))) 
+        self.report('[final_cg] cg to context (1 step).')
         return
  
     def check_final_cg(self):
@@ -938,16 +1012,33 @@ class CpWorkChain(WorkChain):
                    copy_mu_mucut=True
             )
         self.to_context(last_nve=append_(self.submit(nve))) 
+        self.report('[run_nve] nve to context')
         return
 
     def run_more(self):
         if self.ctx.nve_count < 10:
-            return true 
+            return True 
         else:
             self.ctx.nve_count = self.ctx.nve_count + 1
-            return false
+            return False
         return
  
     def get_result(self):
         self.out('result', self.ctx.last_nve)
         return
+
+
+class Empty:
+    pass
+class FakeClass(CpWorkChain):
+    pass
+
+def set_fake_something(self,key1,key2,value):
+    if not key1 in FakeClass.__dict__:
+        setattr(FakeClass,key1,Empty())
+    if key2 is not None:
+        setattr(getattr(FakeClass,key1),key2,value)
+    else:
+        setattr(FakeClass,key1,value)
+    self.__class__ = FakeClass
+
