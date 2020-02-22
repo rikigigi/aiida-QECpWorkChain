@@ -177,7 +177,7 @@ def configure_cp_builder_cg(code,
     }
     for key in additional_parameters.keys():
         for subkey in additional_parameters[key].keys():
-            parameters[key][subkey]=additional_parameters[key][subkey]
+            parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
     builder.parameters = Dict(dict=parameters)
     builder.metadata.options.resources = resources['resources']
     builder.metadata.options.max_wallclock_seconds = resources['wallclock']
@@ -270,7 +270,7 @@ def configure_cp_builder_restart(code,
             print ('no AUTOPILOT input to remove')
     for key in additional_parameters.keys():
         for subkey in additional_parameters[key].keys():
-            parameters[key][subkey]=additional_parameters[key][subkey]
+            parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
     builder.parameters = Dict(dict=parameters)
     builder.metadata.options.resources = resources_
     builder.metadata.options.max_wallclock_seconds = wallclock
@@ -449,7 +449,9 @@ def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax=None):
         return res, ax
     else:
         return res
-    
+
+def check_econt(cpcalcjob):
+    pass    
 
 #various calcfunctions
 
@@ -615,7 +617,7 @@ class CpWorkChain(WorkChain):
         spec.output('result')
 
     def emass_dt_not_ok(self):
-        return self.ctx.emass_dt_not_ok
+        return bool(self.ctx.emass_dt_not_ok)
  
     def set_cp_code(self, index):
         self.ctx.current_cp_code=self.inputs.cp_code
@@ -731,7 +733,7 @@ class CpWorkChain(WorkChain):
                         if cc.process_type == 'aiida.calculations:quantumespresso.pw':
                             pwcont = pwcont + 1
                     if pwcont > 0:
-                        break
+                        continue
                 self.report('[compare_forces_pw] comparing forces with PW for calc with pk={} emass={} dt={}'.format(pk,emass,dt))
                 joblist=joblist+generate_pw_from_trajectory(
                                         pwcode,
@@ -763,8 +765,12 @@ class CpWorkChain(WorkChain):
         set_fake_something(self,'submit',None,fake_function) 
         global append_
         append_ = lambda a: a
-        return self.analysis_step()
-
+        print('starting fake ctx state')
+        print('starting tests:')
+        res = self.analysis_step()
+        print('fake ctx state (remember that to_context does nothing):')
+        print (self.ctx.__dict__)
+        print ('return value from analysis_step: ',res)
 
     def analysis_step(self):
 
@@ -855,7 +861,7 @@ class CpWorkChain(WorkChain):
         if len(candidates) == 0 :
             self.report('[analysis_step] no good candidates found. Try to fix')
             self.report('[analysis_step] results are: {}'.format(str(res_1)))
-            self.ctx.emass_dt_not_ok = False
+            self.ctx.emass_dt_not_ok = True
             #generate new set of parameters and run new simulations.
             #No candidates are available for 4 possible reasons: 1) emass too big, 2) emass to low, 3) emasses both too big and too low,  4) no successful simulations.
             #decide what is the case.
@@ -928,6 +934,7 @@ class CpWorkChain(WorkChain):
                 self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
                 return #do it!
             elif have_garbage:
+                #try to decrease the emass (or the timestep)?
                 return 405  
             else:
                 raise RuntimeError('Bug: wrong logic')
@@ -942,8 +949,29 @@ class CpWorkChain(WorkChain):
                     best=candidate
             self.ctx.dt_emass_off=best
             self.ctx.force_ratios=res_1 # save the results
-            self.report('[analysis_step] best candidate dt,emass,off={}',best)
+            self.report('[analysis_step] force_ratios={}'.format(res_1))
+            self.report('[analysis_step] best candidate dt,emass,off={}'.format(best))
         return
+
+    def test_nose_step(self, force_ratios, dt_emass_off, tempw,pressure,vdos_maxs, cp_code, cp_code_res ):
+        #setup fake environment
+        set_fake_something(self,'ctx','current_cp_code',cp_code)
+        set_fake_something(self,'ctx','current_cp_code_cp_resources',cp_code_res)
+        set_fake_something(self,'ctx','dt_emass_off',dt_emass_off)
+        set_fake_something(self,'ctx','force_ratios',force_ratios)
+        set_fake_something(self,'inputs', 'tempw', tempw)
+        set_fake_something(self,'inputs', 'pressure', pressure)
+        set_fake_something(self,'report',None,lambda s,a: print(a))
+        set_fake_something(self,'to_context',None,fake_function) 
+        set_fake_something(self,'submit',None,fake_function) 
+        global append_
+        append_ = lambda a: a
+        print('starting fake ctx state')
+        print('starting tests:')
+        res = self.nose()
+        print('fake ctx state (remember that to_context does nothing):')
+        print (self.ctx.__dict__)
+        print ('return value from analysis_step: ',res)
 
     def nose(self):
         #find simulation to restart. take biggest pk of selected parameters
@@ -959,8 +987,8 @@ class CpWorkChain(WorkChain):
             },
             'IONS': { 
                 'ion_temperature': 'nose',
-                'tempw': float(self.input.tempw),
-                'fnosep': float(self.ctx.vdos_maxs),
+                'tempw': float(self.inputs.tempw),
+                'fnosep': float(self.ctx.vdos_maxs[startfrom.pk]),
                 'nhpcl' : 3,
             },
             'CELL': {
@@ -978,7 +1006,7 @@ class CpWorkChain(WorkChain):
                 additional_parameters=nose_pr_param
              )                                       
         self.to_context(final_nose=self.submit(newcalc))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.input.tempw),float(self.ctx.vdos_maxs),float(self.inputs.pressure)))
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),float(self.ctx.vdos_maxs[startfrom.pk]),float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
