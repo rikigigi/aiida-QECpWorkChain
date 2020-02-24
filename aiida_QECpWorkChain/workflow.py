@@ -471,6 +471,59 @@ def get_maximum_frequency_vdos(traj):
     idx=np.argmax(vdos)
     return Float(np.fft.fftfreq(vel.shape[0],times[-1]-times[-2])[idx])
 
+
+def compare_pop(k1,k2,exclude_list):
+    for k in list(k1.keys()):
+        if k in exclude_list:
+            k1.pop(k)
+            k2.pop(k)
+            continue
+        if k1.pop(k) != k2.pop(k):
+            return False
+    if not k1 and not k2:
+        return True
+    else:
+        raise KeyError('missing keys to compare!')
+
+def are_same_kind(k1_,k2_):
+    k1=copy.deepcopy(k1_)
+    k2=copy.deepcopy(k2_)
+    try:
+       return compare_pop(k1,k2,['name']) 
+    except KeyError:
+        return False
+
+@calcfunction
+def collapse_kinds(structure):
+    attr=structure.get_attribute('kinds')
+    sites=structure.get_attribute('sites')
+
+    #find uniques kind and put them in output_attr:
+    kind_translation={}
+    output_attr=[]
+    for a in attr:
+        new=True
+        kind_name=a['name']
+        for kind in output_attr:
+            if are_same_kind(a,kind):
+                new=False
+                kind_name=kind['name']
+                break
+        if new:
+            output_attr.append(a)
+        kind_translation[a['name']]=kind_name
+    #translate old kind names
+    for site in sites:
+        site['kind_name']=kind_translation[site['kind_name']]
+
+    if not structure.is_stored:
+        s=structure
+    else:
+        s=structure.clone()
+    s.set_attribute('kinds',output_attr)
+    s.set_attribute('sites',sites)
+    return s
+
 def get_structures_from_trajectory(traj,every=1):
     structures=[]
     for i in range(0,traj.numsteps,every):
@@ -649,6 +702,7 @@ class CpWorkChain(WorkChain):
             self.ctx.start_structure = extract_structure_from_trajectory(self.inputs.structure)
         else:
             self.ctx.start_structure = self.inputs.structure
+        self.ctx.start_structure = collapse_kinds(self.ctx.start_structure)
         #set default codes 
         self.set_pw_code(0)
         self.set_cp_code(0)
