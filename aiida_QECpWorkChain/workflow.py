@@ -1049,7 +1049,7 @@ class CpWorkChain(WorkChain):
             'IONS': { 
                 'ion_temperature': 'nose',
                 'tempw': float(self.inputs.tempw),
-                'fnosep': float(self.ctx.vdos_maxs[startfrom.pk]),
+                'fnosep': abs(float(self.ctx.vdos_maxs[startfrom.pk])),
                 'nhpcl' : 3,
             },
             'CELL': {
