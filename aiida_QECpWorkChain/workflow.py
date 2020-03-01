@@ -206,7 +206,8 @@ def configure_cp_builder_restart(code,
                                     copy_mu_mucut=False,
                                     remove_autopilot=True,
                                     additional_parameters={},
-                                    cg=False
+                                    cg=False,
+                                    remove_parameters_namelist=[]
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
@@ -216,6 +217,7 @@ def configure_cp_builder_restart(code,
     are copied from the parent calculation. tstress and tprnfor are setted to True.
     additional_parameters is setted at the end, so it can override every other parameter setted anywhere before
     or during this function call.
+    remove_parameters_namelist are removed at the beginning
     '''
     start_from = get_node(start_from)
     builder=code.get_builder()
@@ -238,12 +240,15 @@ def configure_cp_builder_restart(code,
     #builder.settings = Dict(dict=settings_dict)
     builder.pseudos = get_pseudo_from_inputs(start_from)
     parameters = copy.deepcopy(start_from.inputs.parameters.get_dict())
+    for itemtodel in remove_parameters_namelist:
+        parameters.pop(itemtodel,None)
     parameters['CONTROL']['calculation'] = 'cp'
     parameters['CONTROL']['restart_mode'] = 'restart'
     parameters['CONTROL']['tstress'] = True
     parameters['CONTROL']['tprnfor'] = True
     parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
     parameters['IONS']['ion_velocities'] = 'default'
+    parameters['ELECTRONS']['electron_velocities'] = 'default'
     if not cg:
         parameters['ELECTRONS']['orthogonalization'] = 'ortho'
         parameters['ELECTRONS']['electron_dynamics'] = 'verlet'
@@ -509,9 +514,11 @@ def collapse_kinds(structure):
                 new=False
                 kind_name=kind['name']
                 break
+        nodigit_kind_name=''.join(i for i in kind_name if not i.isdigit())
         if new:
-            output_attr.append(a)
-        kind_translation[a['name']]=kind_name
+            output_attr.append(a) 
+        kind_translation[a['name']]=nodigit_kind_name
+        output_attr[-1]['name']=nodigit_kind_name
     #translate old kind names
     for site in sites:
         site['kind_name']=kind_translation[site['kind_name']]
@@ -1075,7 +1082,9 @@ class CpWorkChain(WorkChain):
                    resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=True,
                    cg=True,
-                   nstep=1
+                   nstep=1,
+                   remove_parameters_namelist=['CELL'],
+                   additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} }
             )
         self.to_context(last_nve=append_(self.submit(final_cg))) 
         self.report('[final_cg] cg to context (1 step).')
