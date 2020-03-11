@@ -2,7 +2,7 @@ import copy
 from enum import Enum
 
 import aiida.orm
-from aiida.orm import Int, Float, Str, List, Dict
+from aiida.orm import Int, Float, Str, List, Dict, ArrayData
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
@@ -124,7 +124,10 @@ def configure_cp_builder_cg(code,
                             ecutwfc,
                             tempw,
                             resources, #={ 'num_machines': 1, 'num_mpiprocs_per_machine': 20},
-                            additional_parameters={}
+                            additional_parameters={},
+                            nstep=50,
+                            ion_velocities=None,
+                            dt=3.0
                             #queue,#='regular1', #inside resources
                             #wallclock=3600,
                             #account=None
@@ -143,8 +146,8 @@ def configure_cp_builder_cg(code,
         'restart_mode' : 'from_scratch',
         'tstress': False ,
         'tprnfor': True,
-        'dt': 3.0,
-        'nstep' : 50,
+        'dt': dt,
+        'nstep' : nstep,
     },
     'SYSTEM' : {
         'ecutwfc': ecutwfc,
@@ -162,19 +165,29 @@ def configure_cp_builder_cg(code,
     'IONS' : {
         'ion_dynamics' : 'verlet',
         #'ion_velocities' : 'default',
-        'ion_velocities' : 'random',
+        'ion_velocities' : 'random' if ion_velocities is None else 'from_input',
         'tempw' : tempw , 
     },
 #    'CELL' : {
 #        'cell_dynamics' : 'none',
 #    },
-    'AUTOPILOT' : [
-        {'onstep' : 7, 'what' : 'dt', 'newvalue' : 6.0 },
-        {'onstep' : 14, 'what' : 'dt', 'newvalue' : 10.0},
-        {'onstep' : 21, 'what' : 'dt', 'newvalue' : 60.0},
-        {'onstep' : 49, 'what' : 'dt', 'newvalue' : 3.0},
-    ]
     }
+    if ion_velocities is not None:
+        parameters['ATOMIC_VELOCITIES']=ion_velocities
+    if nstep>22:
+        parameters['AUTOPILOT'] = [
+        {'onstep' : 7, 'what' : 'dt', 'newvalue' : 6.0 },
+        {'onstep' : 14, 'what' : 'dt', 'newvalue' : 18.0},
+        {'onstep' : 21, 'what' : 'dt', 'newvalue' : 60.0},
+        {'onstep' : nstep-1, 'what' : 'dt', 'newvalue' : dt},
+        ]
+    elif nstep>10:
+        parameters['AUTOPILOT'] = [
+        {'onstep' : 7, 'what' : 'dt', 'newvalue' : 15.0 },
+        {'onstep' : nstep-1, 'what' : 'dt', 'newvalue' : dt},
+        ]
+        
+    
     for key in additional_parameters.keys():
         for subkey in additional_parameters[key].keys():
             parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
@@ -207,7 +220,8 @@ def configure_cp_builder_restart(code,
                                     remove_autopilot=True,
                                     additional_parameters={},
                                     cg=False,
-                                    remove_parameters_namelist=[]
+                                    remove_parameters_namelist=[],
+                                    cmdline=None
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
@@ -218,6 +232,7 @@ def configure_cp_builder_restart(code,
     additional_parameters is setted at the end, so it can override every other parameter setted anywhere before
     or during this function call.
     remove_parameters_namelist are removed at the beginning
+    cmdline can be, for example, ['-ntg', '2'] or a longer list. if not specified it is copied from the old calculation
     '''
     start_from = get_node(start_from)
     builder=code.get_builder()
@@ -238,6 +253,10 @@ def configure_cp_builder_restart(code,
     #    'cmdline': ['-n', '16'],
     #}
     #builder.settings = Dict(dict=settings_dict)
+    builder.settings=start_from.inputs.settings.clone()
+    if cmdline is not None:
+        builder.settings['cmdline']=cmdline
+    
     builder.pseudos = get_pseudo_from_inputs(start_from)
     parameters = copy.deepcopy(start_from.inputs.parameters.get_dict())
     for itemtodel in remove_parameters_namelist:
@@ -627,6 +646,89 @@ def load_nodes(pks):
         res.append(aiida.orm.load_node(pk))
     return res
 
+def get_total_time(cps):
+    if len(cps)==0:
+        return 0.0
+    tstart=[]
+    tstop=[]
+    for cp in cps:
+        tstart.append(cp.outputs.output_trajectory.get_array('times')[0])
+        tstop.append (cp.outputs.output_trajectory.get_array('times')[1])
+    return max(tstop)-min(tstart)
+    
+
+#TODO
+@calcfunction
+def set_mass(new_mass,structure,multiply=True):
+    new_structure=structure.clone()
+    new_kinds=copy.deepcopy(structure.get_attribute('kinds'))
+    for kind in new_kinds:
+        if multiply:
+            kind['mass']=new_mass[kind['name']]*kind['mass']
+        else:
+            kind['mass']=new_mass[kind['name']]
+    new_structure.set_attribute('kinds',new_kinds)
+    return new_structure
+
+
+
+#TODO
+def volatility(ek,t):
+    return sum(abs(ek[1:]-ek[:-1])/(t[1:]-t[:-1]))
+
+
+def factors(nr):
+    i = 2
+    factors = []
+    while i <= nr:
+        if (nr % i) == 0:
+            factors.append(i)
+            nr = nr / i
+        else:
+            i = i + 1
+    return factors
+
+def unique(array): return [x for i, x in enumerate(array) if array.index(x) == i]
+
+def apply_new_factor(fnode,inp):
+    res2=[]
+    for used_idx,res in inp:
+        for r in res:
+            for i,f in enumerate(fnode):
+                if i in used_idx: continue
+                res2=res2+[(used_idx+[i],[[r[0]*f,r[1]],[r[0],r[1]*f]])]
+    return res2
+
+def apply_many_new_factor(fnode,n=1,start=[[1,1]]):
+    res=[([],start)]
+    t=res
+    for i in range(n):
+        res=apply_new_factor(fnode,res)
+        if len(res)==0: break
+        t=t+res
+    return t
+
+def join_second(t):
+    res=[]
+    for _,r in t:
+        res=res+r
+    return res
+
+#TODO
+def possible_ntg_nb(nnodes,procpernode):
+    #do a prime factor decompsition of nnodes and procpernode
+    #use the lowest factors to generate some ntg and nb, that takes factors in various way
+    fnode=[1]+factors(nnodes)
+    fproc=[1]+factors(procpernode)
+    #generate some possible configurations
+    c1=join_second(apply_many_new_factor(fnode,5)
+    c2=join_second(apply_many_new_factor(fproc,start=[[nnodes,1]])
+    
+    #remove duplicated
+    resu=unique(c1+c2)
+    resu.sort(key=lambda x: x[0]*x[1])
+
+    return resu
 
 
 def fake_function(*args,**kwargs):
@@ -652,28 +754,49 @@ class CpWorkChain(WorkChain):
         spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]))
         spec.input('emass_start_stop_step_mul', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
         spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100))
+        spec.input('skip_emass_dt_test',valid_type=(Bool), default=lambda: Bool(False))
+        spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
+        spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0))
+        spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
+        spec.input('initial_atomic_velocities',valid_type=(ArrayData),required=False)
         spec.outline(
             cls.setup,
-            cls.small_equilibration_cg,
-            cls.emass_benchmark,
-            cls.dt_benchmark,
-            while_(cls.emass_dt_not_ok)(
-                cls.compare_forces_pw,
-                cls.analysis_step
+            if_(find_emass_dt)(
+                cls.small_equilibration_cg,
+                cls.emass_benchmark,
+                cls.dt_benchmark,
+                while_(cls.emass_dt_not_ok)(
+                    cls.compare_forces_pw,
+                    cls.analysis_step
+                )
+            ).else_(
+                #start with some cg steps, then go on 
+                cls.small_equilibration_cg
+                #do some nve equilibration?
             ),
-            cls.nose,
-            cls.check_nose,
+            #find best parallelization options
+            #thermobarostatation
+            while_(equil_not_ok)(
+                cls.nose,
+                cls.check_nose,
+                cls.final_cg,
+                cls.check_final_cg,
+                cls.run_nve
+            ),
+            #first production nve simulation index is self.ctx.first_prod_nve_idx
+            #in array self.ctx.last_nve
             cls.final_cg,
             cls.check_final_cg,
             while_(cls.run_more)(
                 cls.run_nve
-            )
+            ),
+            get_result
         )
         spec.exit_code(401,'ERROR_INITIAL_CG_FAILED', message='The initial cg steps failed. I cannot start to work.')
         spec.exit_code(402, 'ERROR_NOSE_FAILED', message='Nose-Hoover thermostat failed.')
         spec.exit_code(403, 'ERROR_FINAL_CG_FAILED', message='Final cg after Nose-Hoover failed.')
         spec.exit_code(404, 'ERROR_NVE_FAILED', message='Error in the NVE simulation')
-        spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating veri expensive random numbers. There is something wrong (cutoff? metal? boo?)')
+        spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating very expensive random numbers. There is something wrong (cutoff? metal? boo?)')
         spec.output('result')
 
     def emass_dt_not_ok(self):
@@ -717,8 +840,11 @@ class CpWorkChain(WorkChain):
         self.ctx.nve_count=0 
         self.report('setup completed')
 
-    def small_equilibration_cg(self):
+    def find_emass_dt(self):
+        return self.inputs.skip_emass_dt_test.value
 
+    def small_equilibration_cg(self):
+        #This is always the first step
         #build cg input
         builder = configure_cp_builder_cg(
                                 self.get_cp_code(),
@@ -728,13 +854,18 @@ class CpWorkChain(WorkChain):
                                 self.inputs.tempw,
                                 self.get_cp_resources_cg (),
                                 additional_parameters=self.inputs.additional_parameters_cp.get_dict()
+                                ion_velocities = self.inputs.initial_atomic_velocities if 'initial_atomic_velocities' in self.inputs else None 
                                )
         
         node = self.submit(builder)
-        #return execution to the daemon. when the calculation will finish, the next step will be called
-        self.report('small_equilibration completed')
-        return ToContext(initial_cg=node)
-        #benchmark to know how much time is needed?
+        if self.inputs.skip_thermobarostat.value:
+            #final_cg starts from final_nose
+            self.to_context(final_nose=node)
+        else:
+            self.to_context(initial_cg=node)
+        
+        self.report('[small_equilibration] cg sent to context')
+        return
 
     def emass_benchmark(self):
         #check that initial cg is ok
@@ -1037,10 +1168,14 @@ class CpWorkChain(WorkChain):
     def nose(self):
         #find simulation to restart. take biggest pk of selected parameters
         self.report('[nose] beginning.')
-        dt,emass,off=self.ctx.dt_emass_off
-        startfrom=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
-        if not startfrom.is_finished_ok:
-            raise RuntimeError('Bug: wrong logic')
+        if not self.inputs.skip_emass_dt_test.value:
+            dt,emass,off=self.ctx.dt_emass_off
+            startfrom=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
+            if not startfrom.is_finished_ok:
+                raise RuntimeError('Bug: wrong logic')
+        else:
+            #startfrom will be a specific cg calculation
+            startfrom=self.ctx.initial_cg
         # run the thermostat
         nose_pr_param={
             'CONTROL': {
@@ -1074,7 +1209,8 @@ class CpWorkChain(WorkChain):
         if not self.ctx.final_nose.is_finished_ok:
             return 402
         return
- 
+
+     
     def final_cg(self):
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
@@ -1095,6 +1231,20 @@ class CpWorkChain(WorkChain):
             return 403
         return
 
+    def equil_not_ok(self):
+        try:
+            calc_to_check=self.ctx.last_nve[-1]
+        except:
+            return True 
+        t=calc_to_check.outputs.output_trajectory.get_array('ionic_temperature')
+        tm=t.mean()
+        tstd=t.std()
+        if abs(tm-float(self.inputs.tempw))<tstd:
+            return False
+            self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
+        else:
+            return True
+
     def run_nve(self):
         nve=configure_cp_builder_restart(
                    self.get_cp_code(),
@@ -1106,16 +1256,32 @@ class CpWorkChain(WorkChain):
         self.report('[run_nve] nve to context')
         return
 
+    def benchmark_parallelization_options(self):
+        
+        nve=configure_cp_builder_restart(
+                   self.get_cp_code(),
+                   self.ctx.last_nve[-1],
+                   resources=self.get_cp_resources_cp(),
+                   copy_mu_mucut=True,
+                   cmdline=['-ntg', ntg, '-nb', nb]
+            )
+        self.to_context(last_nve=append_(self.submit(nve))) 
+        self.report('[run_nve] nve to context')
+        return
+
     def run_more(self):
-        if self.ctx.nve_count < 10:
+        elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
+        if elapsed_simulation_time < self.inputs.nve_required_picoseconds.value:
+            self.ctx.nve_count = self.ctx.nve_count + 1
+            self.report('[run_more] nve_count: {}'.format(int(self.ctx.nve_count)))
             return True 
         else:
-            self.ctx.nve_count = self.ctx.nve_count + 1
+            self.report('[run_more] simulation finished. Total time {} ps'.format(elapsed_simulation_time))
             return False
         return
  
     def get_result(self):
-        self.out('result', self.ctx.last_nve)
+        self.out('result', self.ctx.last_nve[self.ctx.first_prod_nve_idx])
         return
 
 
