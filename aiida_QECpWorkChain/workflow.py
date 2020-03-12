@@ -2,7 +2,7 @@ import copy
 from enum import Enum
 
 import aiida.orm
-from aiida.orm import Int, Float, Str, List, Dict, ArrayData
+from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
@@ -679,14 +679,14 @@ def volatility(ek,t):
 
 def factors(nr):
     i = 2
-    factors = []
+    factor = []
     while i <= nr:
         if (nr % i) == 0:
-            factors.append(i)
+            factor.append(i)
             nr = nr / i
         else:
             i = i + 1
-    return factors
+    return factor
 
 def unique(array): return [x for i, x in enumerate(array) if array.index(x) == i]
 
@@ -721,14 +721,27 @@ def possible_ntg_nb(nnodes,procpernode):
     fnode=[1]+factors(nnodes)
     fproc=[1]+factors(procpernode)
     #generate some possible configurations
-    c1=join_second(apply_many_new_factor(fnode,5)
-    c2=join_second(apply_many_new_factor(fproc,start=[[nnodes,1]])
-    
+    #use only node factors
+    c1=join_second(apply_many_new_factor(fnode,5))
+    #use all nodes in band groups and factors from number of processors everywhere
+    c2=join_second(apply_many_new_factor(fproc,start=[[nnodes,1]]))
+    #use everything only in task groups
+    fprocs=[]
+    for i,f1 in enumerate(fproc):
+        for f2 in fproc[:i]:
+            fprocs.append(f1*f2)
+    c3=[ [1,nnodes*t] for t in fprocs ] 
     #remove duplicated
-    resu=unique(c1+c2)
+    resu=unique(c1+c2+c3)
     resu.sort(key=lambda x: x[0]*x[1])
 
     return resu
+
+def main_loop_line(c):
+    s=c.outputs.retrieved.get_object_content('aiida.out')
+    idx=s.find('main_loop')
+    a=s[idx:].split('\n')[0].split()
+    return [float(a[4][:-1]), int(a[7])]
 
 
 def fake_function(*args,**kwargs):
@@ -759,9 +772,11 @@ class CpWorkChain(WorkChain):
         spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0))
         spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
         spec.input('initial_atomic_velocities',valid_type=(ArrayData),required=False)
+        spec.input('dt',valid_type=(Float),required=False)
+        spec.input('emass',valid_type=(Float),required=False)
         spec.outline(
             cls.setup,
-            if_(find_emass_dt)(
+            if_(cls.find_emass_dt)(
                 cls.small_equilibration_cg,
                 cls.emass_benchmark,
                 cls.dt_benchmark,
@@ -774,15 +789,19 @@ class CpWorkChain(WorkChain):
                 cls.small_equilibration_cg
                 #do some nve equilibration?
             ),
+            cls.setup_check1, #everything will start from ctx.check1 
             #find best parallelization options
+            cls.benchmark_parallelization_options,
+            cls.benchmark_analysis,
             #thermobarostatation
-            while_(equil_not_ok)(
+            while_(cls.equil_not_ok)(
                 cls.nose,
-                cls.check_nose,
-                cls.final_cg,
-                cls.check_final_cg,
-                cls.run_nve
+                cls.check_nose, # this sets ctx.check2
+                cls.final_cg,# append to ctx.last_nve
+                cls.check_final_cg, 
+                cls.run_nve # append to ctx.last_nve
             ),
+            cls.setup_check2, #everything will start from ctx.check2
             #first production nve simulation index is self.ctx.first_prod_nve_idx
             #in array self.ctx.last_nve
             cls.final_cg,
@@ -790,13 +809,15 @@ class CpWorkChain(WorkChain):
             while_(cls.run_more)(
                 cls.run_nve
             ),
-            get_result
+            cls.get_result
         )
         spec.exit_code(401,'ERROR_INITIAL_CG_FAILED', message='The initial cg steps failed. I cannot start to work.')
         spec.exit_code(402, 'ERROR_NOSE_FAILED', message='Nose-Hoover thermostat failed.')
         spec.exit_code(403, 'ERROR_FINAL_CG_FAILED', message='Final cg after Nose-Hoover failed.')
         spec.exit_code(404, 'ERROR_NVE_FAILED', message='Error in the NVE simulation')
         spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating very expensive random numbers. There is something wrong (cutoff? metal? boo?)')
+        spec.exit_code(406, 'ERROR_WRONG_INPUT', message='Wrong input parameters')
+
         spec.output('result')
 
     def emass_dt_not_ok(self):
@@ -838,6 +859,11 @@ class CpWorkChain(WorkChain):
         self.set_cp_code(0)
         self.ctx.emass_dt_not_ok=True
         self.ctx.nve_count=0 
+        self.ctx.cmdline_cp=['-ntg',1,'-nb',1]
+        if self.input.skip_emass_dt_test.value:
+            if not 'dt' in self.inputs and not 'emass' in self.inputs:
+                self.report('[setup] ERROR: if you want to skip the emass/dt benchmark, you must provide values for dt and emass!')
+                return 406 
         self.report('setup completed')
 
     def find_emass_dt(self):
@@ -853,16 +879,12 @@ class CpWorkChain(WorkChain):
                                 self.inputs.ecutwfc,
                                 self.inputs.tempw,
                                 self.get_cp_resources_cg (),
-                                additional_parameters=self.inputs.additional_parameters_cp.get_dict()
+                                additional_parameters=self.inputs.additional_parameters_cp.get_dict(),
                                 ion_velocities = self.inputs.initial_atomic_velocities if 'initial_atomic_velocities' in self.inputs else None 
                                )
         
         node = self.submit(builder)
-        if self.inputs.skip_thermobarostat.value:
-            #final_cg starts from final_nose
-            self.to_context(final_nose=node)
-        else:
-            self.to_context(initial_cg=node)
+        self.to_context(initial_cg=node)
         
         self.report('[small_equilibration] cg sent to context')
         return
@@ -879,7 +901,6 @@ class CpWorkChain(WorkChain):
         params=self.get_cp_resources_cp()
         start,stop,step,fac=self.inputs.emass_start_stop_step_mul
         for mu in fac*np.arange(start,stop,step)**2:
-            key='emass_benchmark__{}'.format(mu)
             calc=configure_cp_builder_restart(
                                                self.get_cp_code(),
                                                self.ctx.initial_cg,
@@ -1160,22 +1181,28 @@ class CpWorkChain(WorkChain):
         append_ = lambda a: a
         print('starting fake ctx state')
         print('starting tests:')
-        res = self.nose()
+        res=self.nose()
         print('fake ctx state (remember that to_context does nothing):')
         print (self.ctx.__dict__)
         print ('return value from analysis_step: ',res)
 
-    def nose(self):
-        #find simulation to restart. take biggest pk of selected parameters
-        self.report('[nose] beginning.')
+    def setup_check1(self):
         if not self.inputs.skip_emass_dt_test.value:
+            #find simulation to restart. take biggest pk of selected parameters
             dt,emass,off=self.ctx.dt_emass_off
-            startfrom=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
-            if not startfrom.is_finished_ok:
+            self.ctx.check1=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
+            if not self.ctx.check1.is_finished_ok:
                 raise RuntimeError('Bug: wrong logic')
         else:
-            #startfrom will be a specific cg calculation
-            startfrom=self.ctx.initial_cg
+            #we started only with a cg calculation
+            self.ctx.check1=self.ctx.initial_cg
+            #set dt_emass_off
+            self.ctx.dt_emass_off=(self.inputs.dt.value, self.inputs.emass.value,0)
+       
+     
+
+    def nose(self):
+        self.report('[nose] beginning.')
         # run the thermostat
         nose_pr_param={
             'CONTROL': {
@@ -1184,7 +1211,7 @@ class CpWorkChain(WorkChain):
             'IONS': { 
                 'ion_temperature': 'nose',
                 'tempw': float(self.inputs.tempw),
-                'fnosep': abs(float(self.ctx.vdos_maxs[startfrom.pk])),
+                'fnosep': abs(float(self.ctx.vdos_maxs[self.ctx.check1.pk])),
                 'nhpcl' : 3,
             },
             'CELL': {
@@ -1193,35 +1220,38 @@ class CpWorkChain(WorkChain):
                 'cell_dofree': 'volume',
             },
         }
-
+        dt,emass,off=self.ctx.dt_emass_off
         newcalc=configure_cp_builder_restart(                
                 self.get_cp_code(),                  
-                startfrom,                        
+                self.ctx.check1,                        
                 resources=self.get_cp_resources_cp(),
                 dt=dt, mu=emass,
-                additional_parameters=nose_pr_param
+                additional_parameters=nose_pr_param,
+                cmdline=self.ctx.cmdline_cp
              )                                       
         self.to_context(final_nose=self.submit(newcalc))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),float(self.ctx.vdos_maxs[startfrom.pk]),float(self.inputs.pressure)))
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),float(self.ctx.vdos_maxs[self.ctx.check1.pk]),float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
         if not self.ctx.final_nose.is_finished_ok:
             return 402
+        else:
+            self.ctx.check2=self.ctx.final_nose
         return
 
+    
      
     def final_cg(self):
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
-                   self.ctx.final_nose,
+                   self.ctx.check2,
                    resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=True,
                    cg=True,
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
-                   additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} }
-            )
+                   additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} }            )
         self.to_context(last_nve=append_(self.submit(final_cg))) 
         self.report('[final_cg] cg to context (1 step).')
         return
@@ -1232,6 +1262,8 @@ class CpWorkChain(WorkChain):
         return
 
     def equil_not_ok(self):
+        if self.inputs.skip_thermobarostat.value:
+            return False
         try:
             calc_to_check=self.ctx.last_nve[-1]
         except:
@@ -1241,33 +1273,64 @@ class CpWorkChain(WorkChain):
         tstd=t.std()
         if abs(tm-float(self.inputs.tempw))<tstd:
             return False
-            self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
         else:
             return True
+
+    def setup_check2(self):
+        if self.inputs.skip_thermobarostat.value:
+            self.ctx.check2=self.ctx.check1
+            self.ctx.first_prod_nve_idx=0
+        else:
+            self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
+            self.ctx.check2=self.ctx.last_nve[-1]
 
     def run_nve(self):
         nve=configure_cp_builder_restart(
                    self.get_cp_code(),
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cp(),
-                   copy_mu_mucut=True
+                   copy_mu_mucut=True,
+                   cmdline=self.ctx.cmdline_cp
             )
         self.to_context(last_nve=append_(self.submit(nve))) 
         self.report('[run_nve] nve to context')
         return
 
     def benchmark_parallelization_options(self):
-        
-        nve=configure_cp_builder_restart(
-                   self.get_cp_code(),
-                   self.ctx.last_nve[-1],
-                   resources=self.get_cp_resources_cp(),
-                   copy_mu_mucut=True,
-                   cmdline=['-ntg', ntg, '-nb', nb]
-            )
-        self.to_context(last_nve=append_(self.submit(nve))) 
-        self.report('[run_nve] nve to context')
+        resources=self.get_cp_resources_cp()
+        configlist=possible_ntg_nb(resources['resources']['num_machines'],
+                                   resources['resources']['num_mpiprocs_per_machine'])
+        if len(configlist)<9:
+            configlist_cut=configlist
+        else:
+            configlist_cut=configlist[:9]
+        for nb,ntg in configlist_cut:
+            nve=configure_cp_builder_restart(               
+                       self.get_cp_code(),                  
+                       self.ctx.check1,
+                       resources=self.get_cp_resources_cp(),
+                       copy_mu_mucut=True,
+                       cmdline=['-ntg', ntg, '-nb', nb]
+                )
+            self.to_context(parallel_benchmark=append_(self.submit(nve))) 
+            self.report('[benchmark_parallelization_options] nve to context: -nb {} -ntg {}'.format(nb,ntg))
         return
+
+    def benchmark_analysis(self):
+        steptime=float('inf')
+        cmdline=['-ntg',1,'-nb',1]
+        for cp in self.ctx.parallel_benchmark:
+            try:
+                time,nsteps=main_loop_line(cp)
+                r=time/float(nsteps)
+                self.report('[benchmark_analysis] {}: {}s per step'.format(cp.inputs.parameters['cmdline'], r))
+                if r<steptime:
+                    steptime=r
+                    cmdline=cp.inputs.parameters['cmdline']
+            except Exception as e:
+                self.report(e)
+        self.ctx.cmdline_cp=cmdline
+        self.report('[benchmark_analysis] BEST {}: {}s per step'.format(cmdline, steptime))
 
     def run_more(self):
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
