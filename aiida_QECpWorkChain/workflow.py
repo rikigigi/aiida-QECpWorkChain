@@ -253,9 +253,15 @@ def configure_cp_builder_restart(code,
     #    'cmdline': ['-n', '16'],
     #}
     #builder.settings = Dict(dict=settings_dict)
-    builder.settings=start_from.inputs.settings.clone()
+    if 'settings' in start_from.inputs:
+        builder.settings=start_from.inputs.settings.clone()
     if cmdline is not None:
-        builder.settings['cmdline']=cmdline
+        if builder.settings is None:
+            builder.settings=Dict(dict={'cmdline':cmdline})
+        else:
+            tdict=builder.settings.get_dict()
+            tdict['cmdline']=cmdline
+            builder.settings.set_dict(tdict)
     
     builder.pseudos = get_pseudo_from_inputs(start_from)
     parameters = copy.deepcopy(start_from.inputs.parameters.get_dict())
@@ -652,8 +658,11 @@ def get_total_time(cps):
     tstart=[]
     tstop=[]
     for cp in cps:
-        tstart.append(cp.outputs.output_trajectory.get_array('times')[0])
-        tstop.append (cp.outputs.output_trajectory.get_array('times')[1])
+        if 'output_trajectory' in cp.outputs:
+            tstart.append(cp.outputs.output_trajectory.get_array('times')[0])
+            tstop.append (cp.outputs.output_trajectory.get_array('times')[-1])
+    if len(tstart)==0:
+        return 0.0
     return max(tstop)-min(tstart)
     
 
@@ -860,14 +869,14 @@ class CpWorkChain(WorkChain):
         self.ctx.emass_dt_not_ok=True
         self.ctx.nve_count=0 
         self.ctx.cmdline_cp=['-ntg',1,'-nb',1]
-        if self.input.skip_emass_dt_test.value:
+        if self.inputs.skip_emass_dt_test.value:
             if not 'dt' in self.inputs and not 'emass' in self.inputs:
                 self.report('[setup] ERROR: if you want to skip the emass/dt benchmark, you must provide values for dt and emass!')
                 return 406 
         self.report('setup completed')
 
     def find_emass_dt(self):
-        return self.inputs.skip_emass_dt_test.value
+        return not self.inputs.skip_emass_dt_test.value
 
     def small_equilibration_cg(self):
         #This is always the first step
@@ -1251,7 +1260,8 @@ class CpWorkChain(WorkChain):
                    cg=True,
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
-                   additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} }            )
+                   additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
+                   cmdline=['-ntg', '1', '-nb', '1']            )
         self.to_context(last_nve=append_(self.submit(final_cg))) 
         self.report('[final_cg] cg to context (1 step).')
         return
@@ -1310,7 +1320,7 @@ class CpWorkChain(WorkChain):
                        self.ctx.check1,
                        resources=self.get_cp_resources_cp(),
                        copy_mu_mucut=True,
-                       cmdline=['-ntg', ntg, '-nb', nb]
+                       cmdline=['-ntg', str(ntg), '-nb', str(nb)]
                 )
             self.to_context(parallel_benchmark=append_(self.submit(nve))) 
             self.report('[benchmark_parallelization_options] nve to context: -nb {} -ntg {}'.format(nb,ntg))
@@ -1318,7 +1328,7 @@ class CpWorkChain(WorkChain):
 
     def benchmark_analysis(self):
         steptime=float('inf')
-        cmdline=['-ntg',1,'-nb',1]
+        cmdline=['-ntg',str(1),'-nb',str(1)]
         for cp in self.ctx.parallel_benchmark:
             try:
                 time,nsteps=main_loop_line(cp)
