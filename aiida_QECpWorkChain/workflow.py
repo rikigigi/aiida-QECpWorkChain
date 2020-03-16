@@ -221,7 +221,8 @@ def configure_cp_builder_restart(code,
                                     additional_parameters={},
                                     cg=False,
                                     remove_parameters_namelist=[],
-                                    cmdline=None
+                                    cmdline=None,
+                                    structure=None
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
@@ -247,7 +248,10 @@ def configure_cp_builder_restart(code,
         if account is not None:
             builder.metadata.options.account = account
     #note that the structure will not be used (he has the restart)
-    builder.structure = start_from.inputs.structure
+    if structure is None:
+        builder.structure = start_from.inputs.structure
+    else:
+        builder.structure = structure
     builder.parent_folder = start_from.outputs.remote_folder
     #settings_dict = {
     #    'cmdline': ['-n', '16'],
@@ -523,6 +527,15 @@ def are_same_kind(k1_,k2_):
     except KeyError:
         return False
 
+#@calcfunction #does not work
+def listizer(*args):
+    '''
+    return the arguments packed in a List. use as listizer(*list)
+    '''
+    return List(list=list(args))
+
+
+
 @calcfunction
 def collapse_kinds(structure):
     attr=structure.get_attribute('kinds')
@@ -686,6 +699,7 @@ def volatility(ek,t):
     return sum(abs(ek[1:]-ek[:-1])/(t[1:]-t[:-1]))
 
 
+
 def factors(nr):
     i = 2
     factor = []
@@ -723,7 +737,6 @@ def join_second(t):
         res=res+r
     return res
 
-#TODO
 def possible_ntg_nb(nnodes,procpernode):
     #do a prime factor decompsition of nnodes and procpernode
     #use the lowest factors to generate some ntg and nb, that takes factors in various way
@@ -800,8 +813,8 @@ class CpWorkChain(WorkChain):
             ),
             cls.setup_check1, #everything will start from ctx.check1 
             #find best parallelization options
-            cls.benchmark_parallelization_options,
-            cls.benchmark_analysis,
+            cls.benchmark_parallelization_options, # sets, if test was performed, new masses for ions
+            cls.benchmark_analysis, #overwrite ctx.check1 with the faster simulation
             #thermobarostatation
             while_(cls.equil_not_ok)(
                 cls.nose,
@@ -826,7 +839,7 @@ class CpWorkChain(WorkChain):
         spec.exit_code(404, 'ERROR_NVE_FAILED', message='Error in the NVE simulation')
         spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating very expensive random numbers. There is something wrong (cutoff? metal? boo?)')
         spec.exit_code(406, 'ERROR_WRONG_INPUT', message='Wrong input parameters')
-
+        spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
         spec.output('result')
 
     def emass_dt_not_ok(self):
@@ -1160,7 +1173,7 @@ class CpWorkChain(WorkChain):
                 return 405  
             else:
                 raise RuntimeError('Bug: wrong logic')
-        else:  # we have candidate parameters ( len(candidates!=0) )
+        else:  # we have cadidate parameters ( len(candidates!=0) )
             self.report('[analysis_step] good candidates found. Going on.')
             self.ctx.emass_dt_not_ok = False # to exit the loop in the workchain
             #pick the one with the highest dt and highest emass run it
@@ -1173,6 +1186,13 @@ class CpWorkChain(WorkChain):
             self.ctx.force_ratios=res_1 # save the results
             self.report('[analysis_step] force_ratios={}'.format(res_1))
             self.report('[analysis_step] best candidate dt,emass,off={}'.format(best))
+            #generate dictionary for ionic mass correction
+            params=res_1[best[1]][best[0]]
+            new_mass={}
+            for p in params.keys():
+                new_mass[p]=params[p]['fratios_mean']
+            self.ctx.ionic_mass_corr=new_mass
+            self.report('[analysis_step] mass_corrections={}'.format(new_mass))
         return
 
     def test_nose_step(self, force_ratios, dt_emass_off, tempw,pressure,vdos_maxs, cp_code, cp_code_res ):
@@ -1307,6 +1327,9 @@ class CpWorkChain(WorkChain):
         return
 
     def benchmark_parallelization_options(self):
+        s=None
+        if not self.inputs.skip_emass_dt_test.value:
+            s=set_mass(self.ctx.ionic_mass_corr,self.ctx.check1.inputs.structure)
         resources=self.get_cp_resources_cp()
         configlist=possible_ntg_nb(resources['resources']['num_machines'],
                                    resources['resources']['num_mpiprocs_per_machine'])
@@ -1320,7 +1343,8 @@ class CpWorkChain(WorkChain):
                        self.ctx.check1,
                        resources=self.get_cp_resources_cp(),
                        copy_mu_mucut=True,
-                       cmdline=['-ntg', str(ntg), '-nb', str(nb)]
+                       cmdline=['-ntg', str(ntg), '-nb', str(nb)],
+                       structure = s
                 )
             self.to_context(parallel_benchmark=append_(self.submit(nve))) 
             self.report('[benchmark_parallelization_options] nve to context: -nb {} -ntg {}'.format(nb,ntg))
@@ -1333,14 +1357,17 @@ class CpWorkChain(WorkChain):
             try:
                 time,nsteps=main_loop_line(cp)
                 r=time/float(nsteps)
-                self.report('[benchmark_analysis] {}: {}s per step'.format(cp.inputs.parameters['cmdline'], r))
+                self.report('[benchmark_analysis] {}: {}s per step'.format(cp.inputs.settings['cmdline'], r))
                 if r<steptime:
                     steptime=r
-                    cmdline=cp.inputs.parameters['cmdline']
+                    cmdline=cp.inputs.settings['cmdline']
+                    self.ctx.check1=cp
             except Exception as e:
                 self.report(e)
         self.ctx.cmdline_cp=cmdline
         self.report('[benchmark_analysis] BEST {}: {}s per step'.format(cmdline, steptime))
+        if steptime==float('inf'):
+            return
 
     def run_more(self):
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
@@ -1349,12 +1376,15 @@ class CpWorkChain(WorkChain):
             self.report('[run_more] nve_count: {}'.format(int(self.ctx.nve_count)))
             return True 
         else:
-            self.report('[run_more] simulation finished. Total time {} ps'.format(elapsed_simulation_time))
+            self.report('[run_more] simulation finished. Total time {} ps. number if NVE simulations submitted {}'.format(elapsed_simulation_time,self.ctx.nve_count))
             return False
         return
  
     def get_result(self):
-        self.out('result', self.ctx.last_nve[self.ctx.first_prod_nve_idx])
+        self.report('[get_result] workflow terminated. Preparing outputs.')
+        res=List(list=self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
+        res.store()
+        self.out('result', res)
         return
 
 
