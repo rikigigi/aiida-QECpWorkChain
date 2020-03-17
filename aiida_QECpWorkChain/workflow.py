@@ -681,11 +681,11 @@ def get_total_time(cps):
 
 #TODO
 @calcfunction
-def set_mass(new_mass,structure,multiply=True):
+def set_mass(new_mass,structure):
     new_structure=structure.clone()
     new_kinds=copy.deepcopy(structure.get_attribute('kinds'))
     for kind in new_kinds:
-        if multiply:
+        if True:
             kind['mass']=new_mass[kind['name']]*kind['mass']
         else:
             kind['mass']=new_mass[kind['name']]
@@ -876,6 +876,7 @@ class CpWorkChain(WorkChain):
         else:
             self.ctx.start_structure = self.inputs.structure
         self.ctx.start_structure = collapse_kinds(self.ctx.start_structure)
+        self.ctx.fnosep=10.0
         #set default codes 
         self.set_pw_code(0)
         self.set_cp_code(0)
@@ -1220,6 +1221,12 @@ class CpWorkChain(WorkChain):
             #find simulation to restart. take biggest pk of selected parameters
             dt,emass,off=self.ctx.dt_emass_off
             self.ctx.check1=get_calc_from_emass_dt (self.ctx.force_ratios,emass,dt)
+            if 'vdos_maxs' in self.ctx:
+                self.ctx.fnosep=abs(float(self.ctx.vdos_maxs[self.ctx.check1.pk]))
+                self.report('[setup_check1] using calculated maximum in vdos as nose freq. {} THz'.format(self.ctx.fnosep))
+            else:
+                self.report('[setup_check1] using default nose freq. {} THz'.format(self.ctx.fnosep))
+                
             if not self.ctx.check1.is_finished_ok:
                 raise RuntimeError('Bug: wrong logic')
         else:
@@ -1240,7 +1247,7 @@ class CpWorkChain(WorkChain):
             'IONS': { 
                 'ion_temperature': 'nose',
                 'tempw': float(self.inputs.tempw),
-                'fnosep': abs(float(self.ctx.vdos_maxs[self.ctx.check1.pk])),
+                'fnosep': self.ctx.fnosep,
                 'nhpcl' : 3,
             },
             'CELL': {
@@ -1259,7 +1266,7 @@ class CpWorkChain(WorkChain):
                 cmdline=self.ctx.cmdline_cp
              )                                       
         self.to_context(final_nose=self.submit(newcalc))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),float(self.ctx.vdos_maxs[self.ctx.check1.pk]),float(self.inputs.pressure)))
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),self.ctx.fnosep,float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
@@ -1329,7 +1336,7 @@ class CpWorkChain(WorkChain):
     def benchmark_parallelization_options(self):
         s=None
         if not self.inputs.skip_emass_dt_test.value:
-            s=set_mass(self.ctx.ionic_mass_corr,self.ctx.check1.inputs.structure)
+            s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
         resources=self.get_cp_resources_cp()
         configlist=possible_ntg_nb(resources['resources']['num_machines'],
                                    resources['resources']['num_mpiprocs_per_machine'])
