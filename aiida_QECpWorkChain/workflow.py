@@ -679,7 +679,7 @@ def get_total_time(cps):
     return max(tstop)-min(tstart)
     
 
-#TODO
+
 @calcfunction
 def set_mass(new_mass,structure):
     new_structure=structure.clone()
@@ -693,6 +693,35 @@ def set_mass(new_mass,structure):
     return new_structure
 
 
+#traj=cp.outputs.output_trajectory
+def merge_trajectories(t):
+    arraynames=t[0].get_arraynames()
+    steps={}
+    arrays={}
+    symbols=t[0].symbols
+    for a in arraynames:
+        arrays[a]=[]
+    for traj in t:
+        #traj=c.outputs.output_trajectory
+        if not symbols == traj.symbols:
+            raise RuntimeError('Wrong symbols: trajectories are not compatible')
+        for idx,step in enumerate(traj.get_array('steps')):
+            steps.setdefault(step,[]).append((traj,idx))
+    sortedkeys=list(steps.keys())
+    sortedkeys.sort()
+    for stepid in sortedkeys:
+        print(stepid)
+        for arrkey in arraynames:
+            arrays[arrkey].append(steps[stepid][-1][0].get_array(arrkey)[steps[stepid][-1][1]])
+    res=aiida.orm.nodes.data.array.trajectory.TrajectoryData()
+    res.set_attribute('symbols',symbols)
+    for a in arraynames:
+        res.set_array(a,np.array(arrays[a]))
+    return res
+
+@calcfunction
+def merge_traj(t1,t2):
+    return merge_trajectories([t1,t2])
 
 #TODO
 def volatility(ek,t):
@@ -1389,8 +1418,15 @@ class CpWorkChain(WorkChain):
  
     def get_result(self):
         self.report('[get_result] workflow terminated. Preparing outputs.')
-        res=List(list=self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
-        res.store()
+        #concatenate all nve trajectories
+        res=None
+        for cp in self.ctx.last_nve[self.ctx.first_prod_nve_idx:]:
+            if res is not None:
+                if 'output_trajectory' in cp.outputs:
+                    res=merge_traj(res,cp.outputs.output_trajectory)
+            else:
+                if 'output_trajectory' in cp.outputs:
+                    res=cp.outputs.output_trajectory
         self.out('result', res)
         return
 
