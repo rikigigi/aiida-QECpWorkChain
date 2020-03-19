@@ -723,6 +723,17 @@ def merge_trajectories(t):
 def merge_traj(t1,t2):
     return merge_trajectories([t1,t2])
 
+def merge_many_traj(cplist):
+    res=None
+    for cp in cplist:
+        if res is not None:
+            if 'output_trajectory' in cp.outputs:
+                res=merge_traj(res,cp.outputs.output_trajectory)
+        else:
+            if 'output_trajectory' in cp.outputs:
+                res=cp.outputs.output_trajectory
+    return res
+
 #TODO
 def volatility(ek,t):
     return sum(abs(ek[1:]-ek[:-1])/(t[1:]-t[:-1]))
@@ -825,6 +836,9 @@ class CpWorkChain(WorkChain):
         spec.input('initial_atomic_velocities',valid_type=(ArrayData),required=False)
         spec.input('dt',valid_type=(Float),required=False)
         spec.input('emass',valid_type=(Float),required=False)
+        spec.input('cmdline_cp',valid_type=(List), required=False)
+        spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False))
+
         spec.outline(
             cls.setup,
             if_(cls.find_emass_dt)(
@@ -845,14 +859,17 @@ class CpWorkChain(WorkChain):
             cls.benchmark_parallelization_options, # sets, if test was performed, new masses for ions
             cls.benchmark_analysis, #overwrite ctx.check1 with the faster simulation
             #thermobarostatation
+            #prepare ctx.last_nve
+            cls.nose_setup, #everything will start from ctx.last_nve[-1]
             while_(cls.equil_not_ok)(
                 cls.nose,
-                cls.check_nose, # this sets ctx.check2
+                cls.check_nose, # append to ctx.last_nve
                 cls.final_cg,# append to ctx.last_nve
                 cls.check_final_cg, 
                 cls.run_nve # append to ctx.last_nve
+                
             ),
-            cls.setup_check2, #everything will start from ctx.check2
+            cls.setup_check2, #everything will start from ctx.last_nve[-1]
             #first production nve simulation index is self.ctx.first_prod_nve_idx
             #in array self.ctx.last_nve
             cls.final_cg,
@@ -869,7 +886,12 @@ class CpWorkChain(WorkChain):
         spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating very expensive random numbers. There is something wrong (cutoff? metal? boo?)')
         spec.exit_code(406, 'ERROR_WRONG_INPUT', message='Wrong input parameters')
         spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
-        spec.output('result')
+        spec.output('nve_prod_traj')
+        spec.output('full_traj')
+        spec.output('dt')
+        spec.output('emass')
+        spec.output('cmdline_cp')
+        spec.output('kinds')
 
     def emass_dt_not_ok(self):
         return bool(self.ctx.emass_dt_not_ok)
@@ -911,11 +933,16 @@ class CpWorkChain(WorkChain):
         self.set_cp_code(0)
         self.ctx.emass_dt_not_ok=True
         self.ctx.nve_count=0 
-        self.ctx.cmdline_cp=['-ntg',1,'-nb',1]
+        if 'cmdline_cp' in self.inputs:
+            self.ctx.cmdline_cp=self.inputs.cmdline_cp.get_list()
+        else:
+            self.ctx.cmdline_cp=['-ntg','1','-nb','1']
         if self.inputs.skip_emass_dt_test.value:
             if not 'dt' in self.inputs and not 'emass' in self.inputs:
                 self.report('[setup] ERROR: if you want to skip the emass/dt benchmark, you must provide values for dt and emass!')
                 return 406 
+            self.out('dt', self.inputs.dt)
+            self.out('emass',self.inputs.emass)
         self.report('setup completed')
 
     def find_emass_dt(self):
@@ -957,7 +984,8 @@ class CpWorkChain(WorkChain):
                                                self.get_cp_code(),
                                                self.ctx.initial_cg,
                                                mu=mu,
-                                               resources=params
+                                               resources=params,
+                                               cmdline=self.ctx.cmdline_cp
                                              )
             self.to_context(emass_benchmark=append_(self.submit(calc)))
             self.report('[emass_benchmark] emass={} sent to context'.format(mu))
@@ -977,7 +1005,8 @@ class CpWorkChain(WorkChain):
                                                    calc,
                                                    resources=params,
                                                    copy_mu_mucut=True,
-                                                   dt=dt
+                                                   dt=dt,
+                                                   cmdline=self.ctx.cmdline_cp
                                                    )
                     self.to_context(dt_benchmark=append_(self.submit(newcalc)))
             else:
@@ -1216,6 +1245,12 @@ class CpWorkChain(WorkChain):
             self.ctx.force_ratios=res_1 # save the results
             self.report('[analysis_step] force_ratios={}'.format(res_1))
             self.report('[analysis_step] best candidate dt,emass,off={}'.format(best))
+            dt_=Float(best[0])
+            dt_.store()
+            emass_=Float(best[1])
+            emass_.store()
+            self.out('dt',dt_)
+            self.out('emass',emass_)
             #generate dictionary for ionic mass correction
             params=res_1[best[1]][best[0]]
             new_mass={}
@@ -1264,7 +1299,12 @@ class CpWorkChain(WorkChain):
             #set dt_emass_off
             self.ctx.dt_emass_off=(self.inputs.dt.value, self.inputs.emass.value,0)
        
-     
+    
+    def nose_setup(self):
+        if 'last_nve' in self.ctx:
+            self.ctx.last_nve.append(self.ctx.check1)
+        else:
+            self.ctx.last_nve=[self.ctx.check1] 
 
     def nose(self):
         self.report('[nose] beginning.')
@@ -1288,21 +1328,19 @@ class CpWorkChain(WorkChain):
         dt,emass,off=self.ctx.dt_emass_off
         newcalc=configure_cp_builder_restart(                
                 self.get_cp_code(),                  
-                self.ctx.check1,                        
+                self.ctx.last_nve[-1],                        
                 resources=self.get_cp_resources_cp(),
                 dt=dt, mu=emass,
                 additional_parameters=nose_pr_param,
                 cmdline=self.ctx.cmdline_cp
              )                                       
-        self.to_context(final_nose=self.submit(newcalc))       
+        self.to_context(last_nve=append_(self.submit(newcalc)))       
         self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),self.ctx.fnosep,float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
-        if not self.ctx.final_nose.is_finished_ok:
+        if not self.ctx.last_nve[-1].is_finished_ok:
             return 402
-        else:
-            self.ctx.check2=self.ctx.final_nose
         return
 
     
@@ -1310,7 +1348,7 @@ class CpWorkChain(WorkChain):
     def final_cg(self):
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
-                   self.ctx.check2,
+                   self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=True,
                    cg=True,
@@ -1330,25 +1368,23 @@ class CpWorkChain(WorkChain):
     def equil_not_ok(self):
         if self.inputs.skip_thermobarostat.value:
             return False
-        try:
-            calc_to_check=self.ctx.last_nve[-1]
-        except:
-            return True 
-        t=calc_to_check.outputs.output_trajectory.get_array('ionic_temperature')
+        if not 'last_nve' in self.ctx:
+            return True
+        t=self.ctx.last_nve[-1].outputs.output_trajectory.get_array('ionic_temperature')
         tm=t.mean()
         tstd=t.std()
+        self.report('[equil_not_ok] T={} std(T)={}'.format(tm,tstd))
         if abs(tm-float(self.inputs.tempw))<tstd:
+            self.report('[equil_not_ok] equilibrated')
             return False
         else:
             return True
 
     def setup_check2(self):
-        if self.inputs.skip_thermobarostat.value:
-            self.ctx.check2=self.ctx.check1
-            self.ctx.first_prod_nve_idx=0
-        else:
-            self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
-            self.ctx.check2=self.ctx.last_nve[-1]
+        if not 'last_nve' in self.ctx:
+            self.ctx.last_nve=[self.ctx.check1]
+        self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
+        self.ctx.check2=self.ctx.last_nve[-1]
 
     def run_nve(self):
         nve=configure_cp_builder_restart(
@@ -1363,6 +1399,8 @@ class CpWorkChain(WorkChain):
         return
 
     def benchmark_parallelization_options(self):
+        if self.inputs.skip_parallel_test.value:
+            return
         s=None
         if not self.inputs.skip_emass_dt_test.value:
             s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
@@ -1387,6 +1425,8 @@ class CpWorkChain(WorkChain):
         return
 
     def benchmark_analysis(self):
+        if self.inputs.skip_parallel_test.value:
+            return
         steptime=float('inf')
         cmdline=['-ntg',str(1),'-nb',str(1)]
         for cp in self.ctx.parallel_benchmark:
@@ -1419,15 +1459,20 @@ class CpWorkChain(WorkChain):
     def get_result(self):
         self.report('[get_result] workflow terminated. Preparing outputs.')
         #concatenate all nve trajectories
-        res=None
-        for cp in self.ctx.last_nve[self.ctx.first_prod_nve_idx:]:
-            if res is not None:
-                if 'output_trajectory' in cp.outputs:
-                    res=merge_traj(res,cp.outputs.output_trajectory)
-            else:
-                if 'output_trajectory' in cp.outputs:
-                    res=cp.outputs.output_trajectory
-        self.out('result', res)
+        res=merge_many_traj(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
+        self.out('nve_prod_traj', res)
+        #concatenate all trajectories
+        res1=merge_many_traj(self.ctx.last_nve[:self.ctx.first_prod_nve_idx])
+        #cmdline
+        if res1 is not None:
+            res1=merge_traj(res1,res)
+            self.out('full_traj',res1)
+        cmdline=List(list=self.ctx.last_nve[-1].inputs.settings['cmdline'])
+        cmdline.store()
+        self.out('cmdline_cp',cmdline)
+        kinds=List(list=self.ctx.last_nve[-1].inputs.structure.get_attribute('kinds'))
+        kinds.store()
+        self.out('kinds',kinds)        
         return
 
 
