@@ -7,7 +7,7 @@ from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
-
+import qe_tools.constants as qeunits
 
 ####
 # utilities for manipulating nested dictionary
@@ -222,12 +222,16 @@ def configure_cp_builder_restart(code,
                                     cg=False,
                                     remove_parameters_namelist=[],
                                     cmdline=None,
-                                    structure=None
+                                    structure=None,
+                                    ttot_ps=None,
+                                    stepwalltime_s=None
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
     If dt is changed with autopilot this can be wrong.
     max_seconds is changed according to 0.9*wallclock, where wallclock is the time requested to the scheduler.
+    nstep can be calculated from the simulation time required if ttot_ps is given (in picoseconds)
+    If stepwalltime is given, the time requested to the scheduler is calculated as nstep*stepwalltime*1.25+30.0, up to a maximum of walltime.
     It performs a restart. In general all parameters but the one that are needed to perform a CP dynamics
     are copied from the parent calculation. tstress and tprnfor are setted to True.
     additional_parameters is setted at the end, so it can override every other parameter setted anywhere before
@@ -275,7 +279,6 @@ def configure_cp_builder_restart(code,
     parameters['CONTROL']['restart_mode'] = 'restart'
     parameters['CONTROL']['tstress'] = True
     parameters['CONTROL']['tprnfor'] = True
-    parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
     parameters['IONS']['ion_velocities'] = 'default'
     parameters['ELECTRONS']['electron_velocities'] = 'default'
     if not cg:
@@ -295,7 +298,6 @@ def configure_cp_builder_restart(code,
             parameters['IONS']['tolp'] = parameters['CONTROL']['dt']
             parameters['ELECTRONS']['electron_velocities'] = 'change_step'
         parameters['CONTROL']['dt'] = dt
-    parameters['CONTROL']['nstep'] = nstep
     if remove_autopilot:
         try:
             del parameters['AUTOPILOT']
@@ -305,9 +307,22 @@ def configure_cp_builder_restart(code,
     for key in additional_parameters.keys():
         for subkey in additional_parameters[key].keys():
             parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
+    if ttot_ps is not None:
+        dt_ps=parameters['CONTROL']['dt']*qeunits.timeau_to_sec*1.0e12
+        nstep=int(ttot_ps/dt_ps+1)
+        print('nstep={} for {} ps'.format(nstep,dt_ps))
+    if stepwalltime_s is not None:
+        wallclock_max=wallclock
+        wallclock=nstep*stepwalltime_s*1.25+30.0
+        wallclock=wallclock if wallclock < wallclock_max else wallclock_max
+        print('wallclock requested:')
+   
+    parameters['CONTROL']['nstep'] = nstep
+    parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
+        
     builder.parameters = Dict(dict=parameters)
     builder.metadata.options.resources = resources_
-    builder.metadata.options.max_wallclock_seconds = wallclock
+    builder.metadata.options.max_wallclock_seconds = int(wallclock)
     builder.metadata.options.queue_name = queue
     return builder
 
@@ -832,12 +847,19 @@ class CpWorkChain(WorkChain):
         spec.input('skip_emass_dt_test',valid_type=(Bool), default=lambda: Bool(False))
         spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
         spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0))
+        spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
+        spec.input('nose_eq_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
+        spec.input('tempw_initial_random',valid_type=(Float), required=False)
+        spec.input('tempw_initial_nose',valid_type=(Float), required=False)
+        spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2))
         spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
         spec.input('initial_atomic_velocities',valid_type=(ArrayData),required=False)
         spec.input('dt',valid_type=(Float),required=False)
         spec.input('emass',valid_type=(Float),required=False)
         spec.input('cmdline_cp',valid_type=(List), required=False)
         spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False))
+        spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0))
+        spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0))
 
         spec.outline(
             cls.setup,
@@ -860,14 +882,17 @@ class CpWorkChain(WorkChain):
             cls.benchmark_analysis, #overwrite ctx.check1 with the faster simulation
             #thermobarostatation
             #prepare ctx.last_nve
-            cls.nose_setup, #everything will start from ctx.last_nve[-1]
+            cls.nose_setup, #setup ctx.last_nve
             while_(cls.equil_not_ok)(
-                cls.nose,
-                cls.check_nose, # append to ctx.last_nve
+                cls.nose_prepare, #sets nose counters
+                while_(cls.check_nose)(
+                    cls.nose # append to ctx.last_nve
+                ),
                 cls.final_cg,# append to ctx.last_nve
-                cls.check_final_cg, 
-                cls.run_nve # append to ctx.last_nve
-                
+                cls.check_final_cg,
+                while_(cls.check_nve_nose)(
+                    cls.run_nve # append to ctx.last_nve
+                )
             ),
             cls.setup_check2, #everything will start from ctx.last_nve[-1]
             #first production nve simulation index is self.ctx.first_prod_nve_idx
@@ -956,7 +981,7 @@ class CpWorkChain(WorkChain):
                                 self.inputs.pseudo_family,
                                 self.ctx.start_structure,
                                 self.inputs.ecutwfc,
-                                self.inputs.tempw,
+                                self.inputs.tempw_initial_random if 'tempw_initial_random' in self.inputs else self.inputs.tempw,
                                 self.get_cp_resources_cg (),
                                 additional_parameters=self.inputs.additional_parameters_cp.get_dict(),
                                 ion_velocities = self.inputs.initial_atomic_velocities if 'initial_atomic_velocities' in self.inputs else None 
@@ -977,7 +1002,8 @@ class CpWorkChain(WorkChain):
         #...
 
         #prepare multiple
-        params=self.get_cp_resources_cp()
+        params=copy.deepcopy(self.get_cp_resources_cp())
+        params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
         start,stop,step,fac=self.inputs.emass_start_stop_step_mul
         for mu in fac*np.arange(start,stop,step)**2:
             calc=configure_cp_builder_restart(
@@ -994,7 +1020,8 @@ class CpWorkChain(WorkChain):
         return
 
     def dt_benchmark(self):
-        params=self.get_cp_resources_cp()
+        params=copy.deepcopy(self.get_cp_resources_cp())
+        params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
         for calc in self.ctx.emass_benchmark:
             mu,dt,pk=get_emass_dt_pk( calc) 
             if calc.is_finished_ok:
@@ -1141,10 +1168,12 @@ class CpWorkChain(WorkChain):
                     startfrom=get_parent_calculation(calc.get_incoming().all_nodes())
                     if len(startfrom) != 1:                    
                         raise RuntimeError('Bug: wrong logic') 
+                    params=copy.deepcopy(self.get_cp_resources_cp())
+                    params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                     newcalc=configure_cp_builder_restart(            
                                self.get_cp_code(),                  
                                startfrom[0],                        
-                               resources=self.get_cp_resources_cp(),
+                               resources=params,
                                dt=dt, mu=emass                      
                             )                                            
                     self.to_context(dt_benchmark=append_(self.submit(newcalc)))
@@ -1177,10 +1206,12 @@ class CpWorkChain(WorkChain):
                 new_dt=dt_big*(3.0/4.0)**0.5
                 #get a calculation from wich we can start. pick the first one
                 startfrom=get_parent_calc_from_emass_dt(res_1,too_big_smallest_emass,dt_big)
+                params=copy.deepcopy(self.get_cp_resources_cp())
+                params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
-                                resources=self.get_cp_resources_cp(),
+                                resources=params,
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
@@ -1198,10 +1229,12 @@ class CpWorkChain(WorkChain):
                 new_dt=(dt_small+dt_big)/2.0
                 #get a calculation from wich we can start. pick the first one
                 startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small)
+                params=copy.deepcopy(self.get_cp_resources_cp())
+                params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
-                                resources=self.get_cp_resources_cp(),
+                                resources=params,
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
@@ -1218,10 +1251,12 @@ class CpWorkChain(WorkChain):
                 new_dt=dt_small*(4.0/3.0)**0.5
                 #get a calculation from wich we can start. pick the first one
                 startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small)
+                params=copy.deepcopy(self.get_cp_resources_cp())
+                params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
-                                resources=self.get_cp_resources_cp(),
+                                resources=params,
                                 dt=new_dt, mu=new_emass                      
                              )                                       
                 self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
@@ -1298,24 +1333,40 @@ class CpWorkChain(WorkChain):
             self.ctx.check1=self.ctx.initial_cg
             #set dt_emass_off
             self.ctx.dt_emass_off=(self.inputs.dt.value, self.inputs.emass.value,0)
-       
     
     def nose_setup(self):
         if 'last_nve' in self.ctx:
             self.ctx.last_nve.append(self.ctx.check1)
         else:
             self.ctx.last_nve=[self.ctx.check1] 
+        #setup intermediate temperatures
+        if 'tempw_initial_nose' in self.inputs:
+            self.ctx.Tstart=self.inputs.tempw_initial_nose.value
+        elif 'tempw_initial_random' in self.inputs:
+            self.ctx.Tstart=self.inputs.tempw_initial_random.value
+        else:
+            self.ctx.Tstart=self.inputs.tempw.value
+        self.ctx.idx_thermo_cycle=0
+
+    def nose_prepare(self):
+        self.ctx.nose_start=len(self.ctx.last_nve)
+        self.ctx.run_nve_ps=self.inputs.nose_eq_required_picoseconds.value
 
     def nose(self):
         self.report('[nose] beginning.')
         # run the thermostat
+        if self.inputs.nthermo_cycle.value > 1:
+            tempw=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
+                                          float(self.inputs.nthermo_cycle.value-1)
+        else:
+            tempw=self.inputs.tempw.value
         nose_pr_param={
             'CONTROL': {
                 'calculation': 'vc-cp',
             },
             'IONS': { 
                 'ion_temperature': 'nose',
-                'tempw': float(self.inputs.tempw),
+                'tempw': float(tempw),
                 'fnosep': self.ctx.fnosep,
                 'nhpcl' : 3,
             },
@@ -1332,16 +1383,37 @@ class CpWorkChain(WorkChain):
                 resources=self.get_cp_resources_cp(),
                 dt=dt, mu=emass,
                 additional_parameters=nose_pr_param,
-                cmdline=self.ctx.cmdline_cp
+                cmdline=self.ctx.cmdline_cp,
+                ttot_ps=self.inputs.nose_required_picoseconds.value,
+                stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None
              )                                       
         self.to_context(last_nve=append_(self.submit(newcalc)))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.inputs.tempw),self.ctx.fnosep,float(self.inputs.pressure)))
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(tempw),self.ctx.fnosep,float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
-        if not self.ctx.last_nve[-1].is_finished_ok:
-            return 402
-        return
+        elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
+        nose_number=len(self.ctx.last_nve)-self.ctx.nose_start
+        if elapsed_simulation_time < self.inputs.nose_required_picoseconds.value:
+            self.report('[check_nose] finished nose steps: {}'.format(nose_number))
+            return True 
+        else:
+            self.report('[check_nose] nose finished. Total time {} ps. Number of nose submitted: {}'.format(elapsed_simulation_time,nose_number))
+            return False
+        
+    def check_nve_nose(self):
+        elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
+        nose_number=len(self.ctx.last_nve)-self.ctx.first_prod_nve_idx
+        if elapsed_simulation_time < self.inputs.nose_eq_required_picoseconds.value:
+            self.report('[check_nose] finished nose steps: {}'.format(nose_number))
+            return True 
+        else:
+            self.report('[check_nose] nose finished. Total time {} ps. Number of nose submitted: {}'.format(elapsed_simulation_time,nose_number))
+            return False
+        
+        #if not self.ctx.last_nve[-1].is_finished_ok:
+        #    return 402
+        #return
 
     
      
@@ -1361,6 +1433,7 @@ class CpWorkChain(WorkChain):
         return
  
     def check_final_cg(self):
+        self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
         if not self.ctx.last_nve[-1].is_finished_ok:
             return 403
         return
@@ -1378,13 +1451,18 @@ class CpWorkChain(WorkChain):
             self.report('[equil_not_ok] equilibrated')
             return False
         else:
-            return True
+            self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
+            if self.ctx.idx_thermo_cycle >= self.inputs.nthermo_cycle.value:
+                return True
+            else:
+                return False
 
     def setup_check2(self):
         if not 'last_nve' in self.ctx:
             self.ctx.last_nve=[self.ctx.check1]
         self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
         self.ctx.check2=self.ctx.last_nve[-1]
+        self.ctx.run_nve_ps=self.inputs.nve_required_picoseconds.value
 
     def run_nve(self):
         nve=configure_cp_builder_restart(
@@ -1392,7 +1470,9 @@ class CpWorkChain(WorkChain):
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cp(),
                    copy_mu_mucut=True,
-                   cmdline=self.ctx.cmdline_cp
+                   cmdline=self.ctx.cmdline_cp,
+                   ttot_ps=self.ctx.run_nve_ps,
+                   stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None
             )
         self.to_context(last_nve=append_(self.submit(nve))) 
         self.report('[run_nve] nve to context')
@@ -1404,7 +1484,8 @@ class CpWorkChain(WorkChain):
         s=None
         if not self.inputs.skip_emass_dt_test.value:
             s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
-        resources=self.get_cp_resources_cp()
+        resources=copy.deepcopy(self.get_cp_resources_cp())
+        resources['wallclock']=self.inputs.benchmark_parallel_walltime_s.value
         configlist=possible_ntg_nb(resources['resources']['num_machines'],
                                    resources['resources']['num_mpiprocs_per_machine'])
         if len(configlist)<9:
@@ -1444,6 +1525,7 @@ class CpWorkChain(WorkChain):
         self.report('[benchmark_analysis] BEST {}: {}s per step'.format(cmdline, steptime))
         if steptime==float('inf'):
             return
+        self.ctx.stepwalltime_s=steptime
 
     def run_more(self):
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
