@@ -224,14 +224,15 @@ def configure_cp_builder_restart(code,
                                     cmdline=None,
                                     structure=None,
                                     ttot_ps=None,
-                                    stepwalltime_s=None
+                                    stepwalltime_s=None,
+                                    print=print
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
     If dt is changed with autopilot this can be wrong.
     max_seconds is changed according to 0.9*wallclock, where wallclock is the time requested to the scheduler.
     nstep can be calculated from the simulation time required if ttot_ps is given (in picoseconds)
-    If stepwalltime is given, the time requested to the scheduler is calculated as nstep*stepwalltime*1.25+30.0, up to a maximum of walltime.
+    If stepwalltime is given, the time requested to the scheduler is calculated as nstep*stepwalltime*1.25+120.0, up to a maximum of walltime.
     It performs a restart. In general all parameters but the one that are needed to perform a CP dynamics
     are copied from the parent calculation. tstress and tprnfor are setted to True.
     additional_parameters is setted at the end, so it can override every other parameter setted anywhere before
@@ -310,12 +311,12 @@ def configure_cp_builder_restart(code,
     if ttot_ps is not None:
         dt_ps=parameters['CONTROL']['dt']*qeunits.timeau_to_sec*1.0e12
         nstep=int(ttot_ps/dt_ps+1)
-        print('nstep={} for {} ps'.format(nstep,dt_ps))
+        print('nstep={}, dt = {} ps'.format(nstep,dt_ps))
     if stepwalltime_s is not None:
         wallclock_max=wallclock
-        wallclock=nstep*stepwalltime_s*1.25+30.0
+        wallclock=nstep*stepwalltime_s*1.25+120.0
         wallclock=wallclock if wallclock < wallclock_max else wallclock_max
-        print('wallclock requested:')
+        print('wallclock requested: {} s'.format(wallclock))
    
     parameters['CONTROL']['nstep'] = nstep
     parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
@@ -1351,22 +1352,23 @@ class CpWorkChain(WorkChain):
     def nose_prepare(self):
         self.ctx.nose_start=len(self.ctx.last_nve)
         self.ctx.run_nve_ps=self.inputs.nose_eq_required_picoseconds.value
+        if self.inputs.nthermo_cycle.value > 1:
+            self.ctx.tempw_current=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
+                                          float(self.inputs.nthermo_cycle.value-1)
+        else:
+            self.ctx.tempw_current=self.inputs.tempw.value
 
     def nose(self):
         self.report('[nose] beginning.')
+        nose_ps_done=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         # run the thermostat
-        if self.inputs.nthermo_cycle.value > 1:
-            tempw=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
-                                          float(self.inputs.nthermo_cycle.value-1)
-        else:
-            tempw=self.inputs.tempw.value
         nose_pr_param={
             'CONTROL': {
                 'calculation': 'vc-cp',
             },
             'IONS': { 
                 'ion_temperature': 'nose',
-                'tempw': float(tempw),
+                'tempw': float(self.ctx.tempw_current),
                 'fnosep': self.ctx.fnosep,
                 'nhpcl' : 3,
             },
@@ -1384,16 +1386,24 @@ class CpWorkChain(WorkChain):
                 dt=dt, mu=emass,
                 additional_parameters=nose_pr_param,
                 cmdline=self.ctx.cmdline_cp,
-                ttot_ps=self.inputs.nose_required_picoseconds.value,
-                stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None
+                ttot_ps=abs(self.inputs.nose_required_picoseconds.value-nose_ps_done),
+                stepwalltime_s= self.ctx.stepwalltime_nose_s if 'stepwalltime_nose_s' in self.ctx else ( self.ctx.stepwalltime_s*3 if 'stepwalltime_s' in self.ctx else None  ),
+                   print= lambda x : self.report('[nose] [builder] {}'.format(x))
              )                                       
         self.to_context(last_nve=append_(self.submit(newcalc)))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(tempw),self.ctx.fnosep,float(self.inputs.pressure)))
+        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.ctx.tempw_current),self.ctx.fnosep,float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         nose_number=len(self.ctx.last_nve)-self.ctx.nose_start
+        #if necessary, get timestep walltime
+        if nose_number>0 and not 'stepwalltime_nose_s' in self.ctx: 
+            time,nsteps=main_loop_line(self.ctx.last_nve[-1])
+            r=time/float(nsteps)
+            self.ctx.stepwalltime_nose_s=r
+            self.report('[check_nose] nose wall time: {}s per step'.format(r))
+ 
         if elapsed_simulation_time < self.inputs.nose_required_picoseconds.value:
             self.report('[check_nose] finished nose steps: {}'.format(nose_number))
             return True 
@@ -1404,11 +1414,17 @@ class CpWorkChain(WorkChain):
     def check_nve_nose(self):
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nose_number=len(self.ctx.last_nve)-self.ctx.first_prod_nve_idx
+        #if necessary, get timestep walltime
+        if nose_number>0 and not 'stepwalltime_s' in self.ctx: 
+            time,nsteps=main_loop_line(self.ctx.last_nve[-1])
+            r=time/float(nsteps)
+            self.ctx.stepwalltime_s=r
+            self.report('[check_nve_nose] nve wall time: {}s per step'.format(r))
         if elapsed_simulation_time < self.inputs.nose_eq_required_picoseconds.value:
-            self.report('[check_nose] finished nose steps: {}'.format(nose_number))
+            self.report('[check_nve_nose] finished nve steps: {}'.format(nose_number))
             return True 
         else:
-            self.report('[check_nose] nose finished. Total time {} ps. Number of nose submitted: {}'.format(elapsed_simulation_time,nose_number))
+            self.report('[check_nve_nose] equilibration nve finished. Total time {} ps. Number of nve submitted: {}'.format(elapsed_simulation_time,nose_number))
             return False
         
         #if not self.ctx.last_nve[-1].is_finished_ok:
@@ -1441,38 +1457,46 @@ class CpWorkChain(WorkChain):
     def equil_not_ok(self):
         if self.inputs.skip_thermobarostat.value:
             return False
-        if not 'last_nve' in self.ctx:
+        if not 'tempw_current' in self.ctx:
             return True
-        t=self.ctx.last_nve[-1].outputs.output_trajectory.get_array('ionic_temperature')
+        # join all previous trajectories
+        joined_traj=merge_many_traj(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
+        t=joined_traj.get_array('ionic_temperature')
         tm=t.mean()
         tstd=t.std()
         self.report('[equil_not_ok] T={} std(T)={}'.format(tm,tstd))
-        if abs(tm-float(self.inputs.tempw))<tstd:
+        if abs(tm-float(self.ctx.tempw_current))<tstd:
+            #we completed this step
+            self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
+            self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,self.inputs.nthermo_cycle.value))
+        else:
+            self.report('[equil_not_ok] repeating thermo cycle {}/{}'.format(self.ctx.idx_thermo_cycle,self.inputs.nthermo_cycle.value))
+       
+        if self.ctx.idx_thermo_cycle >= self.inputs.nthermo_cycle.value:
             self.report('[equil_not_ok] equilibrated')
             return False
         else:
-            self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
-            if self.ctx.idx_thermo_cycle >= self.inputs.nthermo_cycle.value:
-                return True
-            else:
-                return False
+            return True
 
     def setup_check2(self):
         if not 'last_nve' in self.ctx:
             self.ctx.last_nve=[self.ctx.check1]
-        self.ctx.first_prod_nve_idx=len(self.ctx.last_nve)
         self.ctx.check2=self.ctx.last_nve[-1]
         self.ctx.run_nve_ps=self.inputs.nve_required_picoseconds.value
 
+        
+
     def run_nve(self):
+        nve_ps_done=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nve=configure_cp_builder_restart(
                    self.get_cp_code(),
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cp(),
                    copy_mu_mucut=True,
                    cmdline=self.ctx.cmdline_cp,
-                   ttot_ps=self.ctx.run_nve_ps,
-                   stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None
+                   ttot_ps=abs(self.ctx.run_nve_ps-nve_ps_done),
+                   stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None,
+                   print= lambda x : self.report('[run_nve] [builder] {}'.format(x))
             )
         self.to_context(last_nve=append_(self.submit(nve))) 
         self.report('[run_nve] nve to context')
