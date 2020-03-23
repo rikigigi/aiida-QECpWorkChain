@@ -310,7 +310,12 @@ def configure_cp_builder_restart(code,
             parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
     if ttot_ps is not None:
         dt_ps=parameters['CONTROL']['dt']*qeunits.timeau_to_sec*1.0e12
+        #note: nstep is increased by iprint so the trajectory is written
         nstep=int(ttot_ps/dt_ps+1)
+        if 'iprint' in parameters['CONTROL']:
+            nstep=nstep+parameters['CONTROL']['iprint']
+        else:
+            nstep=nstep+10
         print('nstep={}, dt = {} ps'.format(nstep,dt_ps))
     if stepwalltime_s is not None:
         wallclock_max=wallclock
