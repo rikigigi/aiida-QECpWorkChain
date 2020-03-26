@@ -922,7 +922,7 @@ class CpWorkChain(WorkChain):
     def define(cls, spec):
         super().define(spec)
         spec.input('structure', required=True, valid_type=(aiida.orm.nodes.data.StructureData,aiida.orm.nodes.data.TrajectoryData),validator=validate_structure)
-        spec.input('structure_kinds',valid_type=(List))
+        spec.input('structure_kinds',valid_type=(List),required=False)
         spec.input('pseudo_family', required=True, valid_type=(Str),validator=validate_pseudo_family)
         spec.input('ecutwfc', required=True, valid_type=(Float),validator=validate_ecutwfc)
         spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw)
@@ -1061,6 +1061,10 @@ class CpWorkChain(WorkChain):
             self.ctx.start_structure = set_kinds(self.inputs.structure_kinds,self.ctx.start_structure)
             if not self.inputs.skip_emass_dt_test.value:
                 self.report('!! WARNING !! skip_emass_dt_test is False. The masses of atoms will be adjusted, by a rescaling of the current ones.')
+        else:
+            self.report('using default kinds')
+            if not self.inputs.skip_emass_dt_test.value:
+                self.report('!! WARNING !! you are not testing against emass and you are not providing structure_kinds input: inertia of the atoms may be wrong')
         self.ctx.fnosep=10.0
         #set default codes 
         self.set_pw_code(0)
