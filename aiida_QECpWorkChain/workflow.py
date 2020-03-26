@@ -173,7 +173,7 @@ def configure_cp_builder_cg(code,
 #    },
     }
     if ion_velocities is not None:
-        parameters['ATOMIC_VELOCITIES']=ion_velocities
+        builder.settings = Dict(dict={'ATOMIC_VELOCITIES':ion_velocities})
     if nstep>22:
         parameters['AUTOPILOT'] = [
         {'onstep' : 7, 'what' : 'dt', 'newvalue' : 6.0 },
@@ -313,7 +313,7 @@ def configure_cp_builder_restart(code,
         #note: nstep is increased by iprint so the trajectory is written
         nstep=int(ttot_ps/dt_ps+1)
         if 'iprint' in parameters['CONTROL']:
-            nstep=nstep+parameters['CONTROL']['iprint']
+            nstep=nstep+2*parameters['CONTROL']['iprint']
         else:
             nstep=nstep+10
         print('nstep={}, dt = {} ps'.format(nstep,dt_ps))
@@ -517,6 +517,15 @@ def extract_structure_from_trajectory(traj, step_index=lambda: Int(-1)):
     else:
         raise ValueError('index {} out of range for trajectory {}'.format(step_index, traj))
 
+@calcfunction
+def extract_velocities_from_trajectory(traj, step_index=lambda: Int(-1)):
+    if not 'velocities' in traj.get_arraynames():
+        raise ValueError(' array velocities not found in trajectory {}'.format(traj))
+    if abs(int(step_index)) < traj.numsteps:
+        return to_ArrayData(traj.get_array('velocities')[int(step_index)],'velocities')
+    else:
+        raise ValueError('index {} out of range for trajectory {}'.format(step_index, traj))
+
 
 @calcfunction
 def get_maximum_frequency_vdos(traj):
@@ -713,6 +722,12 @@ def set_mass(new_mass,structure):
     new_structure.set_attribute('kinds',new_kinds)
     return new_structure
 
+@calcfunction
+def set_kinds(new_kinds,structure):
+    new_structure=structure.clone()
+    new_structure.set_attribute('kinds',list(new_kinds))
+    return new_structure
+
 
 #traj=cp.outputs.output_trajectory
 def merge_trajectories(t):
@@ -738,6 +753,11 @@ def merge_trajectories(t):
     res.set_attribute('symbols',symbols)
     for a in arraynames:
         res.set_array(a,np.array(arrays[a]))
+    return res
+
+def to_ArrayData(a,key):
+    res=ArrayData()
+    res.set_array(key,a)
     return res
 
 @calcfunction
@@ -831,11 +851,78 @@ def fake_function(*args,**kwargs):
     print(args,kwargs)
     return
 
+
+
+#TODO
+class CpParamConvergence(WorkChain):
+    @classmethod
+    def define(cls,spec):
+        super().define(spec)
+        spec.input('structure',required=True, valid_type=(aiida.orm.nodes.data.StructureData))
+        spec.input('pseudo_family',required=True, valid_type=(Str))
+        spec.input('cp_code',required=True, valid_type=(aiida.orm.nodes.data.code.Code))
+        spec.input('resources',required=True, valid_type=(Dict))
+        spec.input('additional_parameters',valid_type=(Dict))
+        spec.input('start_parameters',valid_type=(Dict))
+        spec.input('end_parameters',valid_type=(Dict))
+        spec.input('step_parameters',valid_type=(Dict))
+        spec.input('ntest_stability',valid_type=(Int), default= lambda : Int(10))
+        spec.output('parameters')
+
+        spec.outline(
+            cls.setup,
+            cls.stability_test,
+            cls.ekin_conv_thr,
+            cls.ecut,
+            cls.ecut_rho, # this will call small_boxes if necessary
+            cls.results
+        )
+
+    def setup(self):
+        self.ctx.param=self.inputs.end_parameters.get_dict()
+        if 'nr1b' in self.ctx.param['SYSTEM']:
+            self.ctx.nrb=True
+        else:
+            self.ctx.nrb=False
+    
+    def run_calc(self):
+        calc=configure_cp_builder_cg(
+            self.inputs.cp_code,
+            self.inputs.pseudo_family,
+            self.inputs.structure,
+            42.0,
+            self.inputs.resources,
+            self.inputs.additional_parameters,
+            dt=6.0
+         )
+        return calc
+    
+    def stability_test(self):
+        for i in range(self.inputs.ntest_stability.value):
+            calc=self.run_calc()
+            self.to_context(tests=append_(calc))
+
+    def ecut(self):
+        pass
+
+    def ecut_rho(self):
+        pass
+
+    def small_boxes(self):
+        pass
+
+    def ekin_conv_thr(self):
+        pass
+    
+    def results(self):
+        pass
+
 class CpWorkChain(WorkChain):
     @classmethod
     def define(cls, spec):
         super().define(spec)
         spec.input('structure', required=True, valid_type=(aiida.orm.nodes.data.StructureData,aiida.orm.nodes.data.TrajectoryData),validator=validate_structure)
+        spec.input('structure_kinds',valid_type=(List))
         spec.input('pseudo_family', required=True, valid_type=(Str),validator=validate_pseudo_family)
         spec.input('ecutwfc', required=True, valid_type=(Float),validator=validate_ecutwfc)
         spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw)
@@ -859,11 +946,12 @@ class CpWorkChain(WorkChain):
         spec.input('tempw_initial_nose',valid_type=(Float), required=False)
         spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2))
         spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
-        spec.input('initial_atomic_velocities',valid_type=(ArrayData),required=False)
+        spec.input('initial_atomic_velocities_A_ps',valid_type=(ArrayData),required=False)
         spec.input('dt',valid_type=(Float),required=False)
         spec.input('emass',valid_type=(Float),required=False)
         spec.input('cmdline_cp',valid_type=(List), required=False)
         spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False))
+        spec.input('nstep_parallel_test',valid_type=(Int), default=lambda: Int(200))
         spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0))
         spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0))
 
@@ -952,12 +1040,27 @@ class CpWorkChain(WorkChain):
         return self.ctx.current_pw_code_resources
 
     def setup(self):
-        #extract structure, if necessary
+        #extract structure from last step of the trajectory, if necessary
         if isinstance(self.inputs.structure,aiida.orm.nodes.data.TrajectoryData ):
             self.ctx.start_structure = extract_structure_from_trajectory(self.inputs.structure)
+            self.report('setting starting positions from last step of input trajectory')
+            #get also velocities, if present, from the trajectory
+            try:
+                self.ctx.start_velocities_A_au = (extract_velocities_from_trajectory(self.inputs.structure).get_array('velocities')*qeunits.timeau_to_sec*1.0e12).tolist()
+                self.report('setting starting velocities from last step of input trajectory')
+            except ValueError:
+                pass
         else:
+            if 'inital_atomic_velocities_A_ps' in self.inputs:
+                self.report('setting starting velocities from input')
+                self.ctx.start_velocities_A_au = (self.inputs.initial_atomic_velocities_A_ps.get_array('velocities')*qeunits.timeau_to_sec*1.0e12).tolist()
             self.ctx.start_structure = self.inputs.structure
         self.ctx.start_structure = collapse_kinds(self.ctx.start_structure)
+        if 'structure_kinds' in self.inputs:
+            self.report('SETTING KINDS as in {}'.format(self.inputs.structure_kinds))
+            self.ctx.start_structure = set_kinds(self.inputs.structure_kinds,self.ctx.start_structure)
+            if not self.inputs.skip_emass_dt_test.value:
+                self.report('!! WARNING !! skip_emass_dt_test is False. The masses of atoms will be adjusted, by a rescaling of the current ones.')
         self.ctx.fnosep=10.0
         #set default codes 
         self.set_pw_code(0)
@@ -974,6 +1077,13 @@ class CpWorkChain(WorkChain):
                 return 406 
             self.out('dt', self.inputs.dt)
             self.out('emass',self.inputs.emass)
+        else:
+            #check that there are some values in the provided range
+            start,stop,step,fac=self.inputs.emass_start_stop_step_mul
+            if len(np.arange(start,stop,step))<=0:
+                return 406 
+            if len(np.arange(*self.inputs.dt_start_stop_step)) <= 0:
+                return 406
         self.report('setup completed')
 
     def find_emass_dt(self):
@@ -990,7 +1100,8 @@ class CpWorkChain(WorkChain):
                                 self.inputs.tempw_initial_random if 'tempw_initial_random' in self.inputs else self.inputs.tempw,
                                 self.get_cp_resources_cg (),
                                 additional_parameters=self.inputs.additional_parameters_cp.get_dict(),
-                                ion_velocities = self.inputs.initial_atomic_velocities if 'initial_atomic_velocities' in self.inputs else None 
+                                ion_velocities = self.ctx.start_velocities_A_au if 'start_velocities_A_au' in self.ctx else None,
+                                nstep=self.inputs.nstep_initial_cg.value
                                )
         
         node = self.submit(builder)
@@ -1528,7 +1639,8 @@ class CpWorkChain(WorkChain):
                        resources=self.get_cp_resources_cp(),
                        copy_mu_mucut=True,
                        cmdline=['-ntg', str(ntg), '-nb', str(nb)],
-                       structure = s
+                       structure = s,
+                       nstep=self.inputs.nstep_parallel_test.value
                 )
             self.to_context(parallel_benchmark=append_(self.submit(nve))) 
             self.report('[benchmark_parallelization_options] nve to context: -nb {} -ntg {}'.format(nb,ntg))
