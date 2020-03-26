@@ -315,7 +315,7 @@ def configure_cp_builder_restart(code,
         if 'iprint' in parameters['CONTROL']:
             nstep=nstep+2*parameters['CONTROL']['iprint']
         else:
-            nstep=nstep+10
+            nstep=nstep+2*10
         print('nstep={}, dt = {} ps'.format(nstep,dt_ps))
     if stepwalltime_s is not None:
         wallclock_max=wallclock
