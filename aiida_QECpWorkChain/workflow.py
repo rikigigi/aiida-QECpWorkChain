@@ -921,39 +921,63 @@ class CpWorkChain(WorkChain):
     @classmethod
     def define(cls, spec):
         super().define(spec)
-        spec.input('structure', required=True, valid_type=(aiida.orm.nodes.data.StructureData,aiida.orm.nodes.data.TrajectoryData),validator=validate_structure)
-        spec.input('structure_kinds',valid_type=(List),required=False)
-        spec.input('pseudo_family', required=True, valid_type=(Str),validator=validate_pseudo_family)
-        spec.input('ecutwfc', required=True, valid_type=(Float),validator=validate_ecutwfc)
-        spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw)
-        spec.input('pressure', required=False, valid_type=(Float))
-        spec.input('pw_code', required=True, valid_type=(aiida.orm.nodes.data.code.Code),validator=validate_pw_list)
+        spec.input('structure', required=True, valid_type=(aiida.orm.nodes.data.StructureData,aiida.orm.nodes.data.TrajectoryData),validator=validate_structure,
+                   help='Input structure. If a trajectory is given, the workchain will use its last step to start the CG. If velocities are present, they will be used to initialize the simulation. Note that if you use a trajectory, usually kind information (like mass) are not included, so default values will be used. If you want to include kind information or override those provided with the input structure, use the input structure_kinds')
+        spec.input('structure_kinds',valid_type=(List),required=False,
+                   help='These kinds will be used to override or set the masses of the various atomic types. Note that the workflow, if skip_emass_dt_test is True, will calculate the ratio between cp forces and pw forces and adjust the provided masses automatically according to this ratio. So if you provide this input, make sure to set skip_emass_dt_test to True and set also the inputs emass and dt, or "bad things can happen"')
+        spec.input('pseudo_family', required=True, valid_type=(Str),validator=validate_pseudo_family,
+                   help='pseudopotential family to use, as in usual aiida operations')
+        spec.input('ecutwfc', required=True, valid_type=(Float),validator=validate_ecutwfc,
+                   help='wavefunction cutoff (Ry), like in the QE input')
+        spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw,
+                   help='Target temperature (K). It is used if thermostat is used and in initial random velocity initialization, if used and if tempw_initial_random is not provided')
+        spec.input('pressure', required=False, valid_type=(Float),
+                   help='Target pressure (KBar or 0.1GPa). Useful only if thermostat is used.')
+        spec.input('pw_code', required=True, valid_type=(aiida.orm.nodes.data.code.Code),validator=validate_pw_list,
+                  help='input pw code (used to calculate force ratio)')
         spec.input('cp_code',required=True, valid_type=(aiida.orm.nodes.data.code.Code), validator=validate_cp_list)
-        spec.input('pw_resources_list',valid_type=(List),required=True)
-        spec.input('cp_resources_cp_list',valid_type=(List),required=True)
-        spec.input('cp_resources_cg_list',valid_type=(List),required=True)
+        spec.input('pw_resources_list',valid_type=(List),required=True,help='Same as cp_resources_cp_list but for pw.x code.')
+        spec.input('cp_resources_cp_list',valid_type=(List),required=True,
+                   help="""List of dictionary like the following:
+{
+ 'resources' : {
+   'num_machines' : 2,
+   'num_mpiprocs_per_machine' : 48,
+ },
+ 'wallclock' : 3600,
+ 'queue' : 'queue_name',
+ 'account': 'account_name',
+}
+currently only the first element of the list is used.
+'wallclock' is the maximum time that can be requested to the scheduler. This code can decide to ask for less.
+""")
+        spec.input('cp_resources_cg_list',valid_type=(List),required=True,help='Same as cp_resources_cp_list but when doing a CG.')
         spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None )
-        spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}))
+        spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}),
+                   help='parameters that will be included in the settings input of the QE CP plugin. These settings will be added on top of the default one. Same format as plugin input')
         spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]))
         spec.input('emass_start_stop_step_mul', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
-        spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100))
+        spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100),
+                   help='Number of pw submitted for every trajectory during calculation of force ratio.')
         spec.input('skip_emass_dt_test',valid_type=(Bool), default=lambda: Bool(False))
         spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
-        spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0))
-        spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
+        spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0),
+                  help='The equilibrated NVE simulation will last at least this number of picoseconds')
+        spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0),
+                  help='Each of the (many) thermobarostating run will last at least this number of picoseconds')
         spec.input('nose_eq_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
-        spec.input('tempw_initial_random',valid_type=(Float), required=False)
-        spec.input('tempw_initial_nose',valid_type=(Float), required=False)
-        spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2))
+        spec.input('tempw_initial_random',valid_type=(Float), required=False, help='If provided, sets the initial temperature when randomply initializing the starting velocities.')
+        spec.input('tempw_initial_nose',valid_type=(Float), required=False, help='Thermostat temperature of the first nose cycle. Then the temperature will be set linearly in between this temperature and tempw, for every nose cycle.')
+        spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2),help='Number of nose cycles')
         spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
         spec.input('initial_atomic_velocities_A_ps',valid_type=(ArrayData),required=False)
-        spec.input('dt',valid_type=(Float),required=False)
-        spec.input('emass',valid_type=(Float),required=False)
-        spec.input('cmdline_cp',valid_type=(List), required=False)
+        spec.input('dt',valid_type=(Float),required=False,help='timestep in atomic units')
+        spec.input('emass',valid_type=(Float),required=False,help='electronic mass, atomic mass units')
+        spec.input('cmdline_cp',valid_type=(List), required=False,help='additional command line parameters of the cp verlet caclulations only (for example parallelization options)')
         spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False))
         spec.input('nstep_parallel_test',valid_type=(Int), default=lambda: Int(200))
-        spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0))
-        spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0))
+        spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0),help='time requested to the scheduler during the test for finding the best parallelization parameters.')
+        spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0),help='same as benchmark_parallel_walltime_s but for dermining the best electronic mass and timestep.')
 
         spec.outline(
             cls.setup,
