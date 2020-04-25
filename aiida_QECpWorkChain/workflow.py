@@ -225,7 +225,9 @@ def configure_cp_builder_restart(code,
                                     structure=None,
                                     ttot_ps=None,
                                     stepwalltime_s=None,
-                                    print=print
+                                    print=print,
+                                    tstress=True,
+                                    from_scratch=False
                                 ):
     '''
     rescaling of atomic and wfc velocities is performed, if needed, using the dt found in the CONTROL namelist.
@@ -234,14 +236,21 @@ def configure_cp_builder_restart(code,
     nstep can be calculated from the simulation time required if ttot_ps is given (in picoseconds)
     If stepwalltime is given, the time requested to the scheduler is calculated as nstep*stepwalltime*1.25+120.0, up to a maximum of walltime.
     It performs a restart. In general all parameters but the one that are needed to perform a CP dynamics
-    are copied from the parent calculation. tstress and tprnfor are setted to True.
+    are copied from the parent calculation. tstress and tprnfor are setted to True by default.
     additional_parameters is setted at the end, so it can override every other parameter setted anywhere before
     or during this function call.
     remove_parameters_namelist are removed at the beginning
     cmdline can be, for example, ['-ntg', '2'] or a longer list. if not specified it is copied from the old calculation
+    If from_scratch is True, restart the calculation copying velocities and positions from last trajectory output step of start_from, and perform a cg. valid only with cg=True
     '''
     start_from = get_node(start_from)
     builder=code.get_builder()
+    #settings_dict = {
+    #    'cmdline': ['-n', '16'],
+    #}
+    #builder.settings = Dict(dict=settings_dict)
+    if 'settings' in start_from.inputs:
+        builder.settings=start_from.inputs.settings.clone()
     if resources is not None:
         resources_=resources['resources']
         queue=     resources['queue']
@@ -252,18 +261,39 @@ def configure_cp_builder_restart(code,
         resources_,queue,wallclock, account=get_resources(start_from)
         if account is not None:
             builder.metadata.options.account = account
-    #note that the structure will not be used (he has the restart)
-    if structure is None:
-        builder.structure = start_from.inputs.structure
+    if not from_scratch:
+        #note that the structure will not be used (he has the restart)
+        if structure is None:
+            builder.structure = start_from.inputs.structure
+        else:
+            builder.structure = structure
+        builder.parent_folder = start_from.outputs.remote_folder
     else:
-        builder.structure = structure
-    builder.parent_folder = start_from.outputs.remote_folder
-    #settings_dict = {
-    #    'cmdline': ['-n', '16'],
-    #}
-    #builder.settings = Dict(dict=settings_dict)
-    if 'settings' in start_from.inputs:
-        builder.settings=start_from.inputs.settings.clone()
+        if not cg:
+            raise ValueError('from_scratch={} and cg={} are incompatible'.format(from_scratch,cg))
+        else:
+            #copy velocities and starting positions from last step
+            last_traj_struct=start_from.outputs.output_trajectory.get_step_structure(-1)
+            if structure is None:
+                new_structure=start_from.inputs.structure.clone()
+            else:
+                new_structure=structure.clone()
+            new_structure.cell=last_traj_struct.cell
+            new_structure.clear_sites()
+            for site in last_traj_struct.sites:
+                new_structure.append_site(site) 
+            builder.structure=new_structure
+            #set velocities
+            ion_velocities=(extract_velocities_from_trajectory(start_from.outputs.output_trajectory).get_array('velocities')*qeunits.timeau_to_sec*1.0e12).tolist()
+            if builder.settings is None:
+                builder.settings=Dict(dict={'ATOMIC_VELOCITIES':
+                                         ion_velocities
+                                      })
+            else:
+                tdict=builder.settings.get_dict()
+                tdict['ATOMIC_VELOCITIES']=ion_velocities
+                builder.settings.set_dict(tdict)
+
     if cmdline is not None:
         if builder.settings is None:
             builder.settings=Dict(dict={'cmdline':cmdline})
@@ -277,8 +307,8 @@ def configure_cp_builder_restart(code,
     for itemtodel in remove_parameters_namelist:
         parameters.pop(itemtodel,None)
     parameters['CONTROL']['calculation'] = 'cp'
-    parameters['CONTROL']['restart_mode'] = 'restart'
-    parameters['CONTROL']['tstress'] = True
+    parameters['CONTROL']['restart_mode'] = 'from_scratch' if from_scratch else  'restart'
+    parameters['CONTROL']['tstress'] = tstress
     parameters['CONTROL']['tprnfor'] = True
     parameters['IONS']['ion_velocities'] = 'default'
     parameters['ELECTRONS']['electron_velocities'] = 'default'
@@ -1029,6 +1059,7 @@ currently only the first element of the list is used.
         spec.exit_code(405, 'ERROR_GARBAGE', message='The simulations are calculating very expensive random numbers. There is something wrong (cutoff? metal? boo?)')
         spec.exit_code(406, 'ERROR_WRONG_INPUT', message='Wrong input parameters')
         spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
+        spec.exit_code(408, 'ERROR_MULTIPLE_FAIL', message='Multiple errors in the simulation that cannot fix.')
         spec.output('nve_prod_traj')
         spec.output('full_traj')
         spec.output('dt')
@@ -1087,7 +1118,7 @@ currently only the first element of the list is used.
                 self.report('!! WARNING !! skip_emass_dt_test is False. The masses of atoms will be adjusted, by a rescaling of the current ones.')
         else:
             self.report('using default kinds')
-            if not self.inputs.skip_emass_dt_test.value:
+            if self.inputs.skip_emass_dt_test.value:
                 self.report('!! WARNING !! you are not testing against emass and you are not providing structure_kinds input: inertia of the atoms may be wrong')
         self.ctx.fnosep=10.0
         #set default codes 
@@ -1112,6 +1143,7 @@ currently only the first element of the list is used.
                 return 406 
             if len(np.arange(*self.inputs.dt_start_stop_step)) <= 0:
                 return 406
+        self.ctx.retry_count=0
         self.report('setup completed')
 
     def find_emass_dt(self):
@@ -1494,6 +1526,8 @@ currently only the first element of the list is used.
         self.ctx.idx_thermo_cycle=0
 
     def nose_prepare(self):
+        #next final_cg will start from scratch, setting the correct number of plane waves
+        self.ctx.cg_scratch=True
         self.ctx.nose_start=len(self.ctx.last_nve)
         self.ctx.run_nve_ps=self.inputs.nose_eq_required_picoseconds.value
         if self.inputs.nthermo_cycle.value > 1:
@@ -1502,8 +1536,32 @@ currently only the first element of the list is used.
         else:
             self.ctx.tempw_current=self.inputs.tempw.value
 
+    def fix_last_nve(self,report):
+        if not self.ctx.last_nve[-1].is_finished_ok:
+            report('[fix_last_nve] last_nve with pk={} is failed with {}'.format(self.ctx.last_nve[-1].pk,self.ctx.last_nve[-1].get_attribute_many(['exit_status', 'exit_message'])))
+            if self.ctx.retry_count==0:
+                #try to resend calc and hope for the best
+                report('[fix_last_nve] resubmitting it')
+                resend=self.ctx.last_nve[-1].get_builder_restart()
+                self.ctx.retry_count=self.ctx.retry_count+1
+                self.to_context(resubmit=self.submit(resend))
+                self.ctx.last_nve[-1]=self.ctx.resubmit
+                return 1
+            else:
+                report('[fix_last_nve] not teached how to deal with this, sorry')
+                return 408
+        else:
+            self.ctx.retry_count=0
+            return 0
+
+
     def nose(self):
         self.report('[nose] beginning.')
+        res=self.fix_last_nve(report=lambda x : self.report('[nose] {}'.format(x)))
+        if res != 0:
+            if res>400:
+                return res
+            return
         nose_ps_done=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         # run the thermostat
         nose_pr_param={
@@ -1539,8 +1597,8 @@ currently only the first element of the list is used.
         return        
    
     def check_nose(self):
-        elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         nose_number=len(self.ctx.last_nve)-self.ctx.nose_start
+        elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         #if necessary, get timestep walltime
         if nose_number>0 and not 'stepwalltime_nose_s' in self.ctx: 
             time,nsteps=main_loop_line(self.ctx.last_nve[-1])
@@ -1578,17 +1636,23 @@ currently only the first element of the list is used.
     
      
     def final_cg(self):
+        if not 'cg_scratch' in self.ctx:
+            self.ctx.cg_scratch=False 
+
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=True,
                    cg=True,
+                   tstress=False,
+                   from_scratch=True if self.ctx.cg_scratch else False,
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
                    additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
                    cmdline=['-ntg', '1', '-nb', '1']            )
         self.to_context(last_nve=append_(self.submit(final_cg))) 
+        self.ctx.cg_scratch=False
         self.report('[final_cg] cg to context (1 step).')
         return
  
@@ -1606,10 +1670,14 @@ currently only the first element of the list is used.
         # join all previous trajectories
         joined_traj=merge_many_traj(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         t=joined_traj.get_array('ionic_temperature')
+        p=joined_traj.get_array('pressure')
         tm=t.mean()
         tstd=t.std()
+        pm=p.mean()
+        pstd=p.std()
         self.report('[equil_not_ok] T={} std(T)={}'.format(tm,tstd))
-        if abs(tm-float(self.ctx.tempw_current))<tstd:
+        self.report('[equil_not_ok] p={} std(p)={}'.format(pm,pstd))
+        if abs(tm-float(self.ctx.tempw_current))<tstd and abs(pm-float(self.inputs.pressure)/10.0)<pstd:
             #we completed this step
             self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
             self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,self.inputs.nthermo_cycle.value))
@@ -1631,6 +1699,11 @@ currently only the first element of the list is used.
         
 
     def run_nve(self):
+        res=self.fix_last_nve(report=lambda x : self.report('[run_nve] {}'.format(x)))
+        if res != 0:
+            if res>400:
+                return res
+            return
         nve_ps_done=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nve=configure_cp_builder_restart(
                    self.get_cp_code(),
