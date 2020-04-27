@@ -310,7 +310,7 @@ def configure_cp_builder_restart(code,
     parameters['CONTROL']['restart_mode'] = 'from_scratch' if from_scratch else  'restart'
     parameters['CONTROL']['tstress'] = tstress
     parameters['CONTROL']['tprnfor'] = True
-    parameters['IONS']['ion_velocities'] = 'default'
+    parameters['IONS']['ion_velocities'] = 'from_input' if from_scratch else 'default' 
     parameters['ELECTRONS']['electron_velocities'] = 'default'
     if not cg:
         parameters['ELECTRONS']['orthogonalization'] = 'ortho'
@@ -323,7 +323,7 @@ def configure_cp_builder_restart(code,
         parameters['ELECTRONS']['emass_cutoff'] = mucut
     elif not 'emass' in start_from.inputs.parameters['ELECTRONS']:
         raise ValueError('emass parameter not found in input dictionary!')
-    if dt is not None:
+    if dt is not None and not from_scratch:
         if abs(parameters['CONTROL']['dt'] - dt) > 1e-5 and dtchange:
             parameters['IONS']['ion_velocities'] = 'change_step'
             parameters['IONS']['tolp'] = parameters['CONTROL']['dt']
