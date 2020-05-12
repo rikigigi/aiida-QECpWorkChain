@@ -18,6 +18,8 @@ class DeepMdTrainCalculation(CalcJob):
         spec.input('param', required=True, valid_type=(Dict))
         spec.input('nline_per_set', default=lambda : Int(2000), valid_type=(Int))
         spec.input('metadata.options.parser_name', valid_type=six.string_types, default='DeepMdTrainParser')
+        spec.input('metadata.options.input_filename', valid_type=str, default='aiida.in')
+        spec.input('metadata.options.output_filename', valid_type=str, default='aiida.out')
 
     def prepare_for_submission(self,folder):
         #create box.npy, coord.npy, force.npy, energy.npy and stress.npy (if present)
@@ -35,13 +37,13 @@ class DeepMdTrainCalculation(CalcJob):
             subfoldername='set.{}'.format(str(i).zfill(3))
             subfolder=folder.get_subfolder(subfoldername,create=True)
             def save_sliced_arr(fname,arr):
-                with subfolder.open(fname,'b') as handle:
+                with subfolder.open(fname,mode='wb',encoding=None) as handle:
                     np.save(handle,arr[startidx:stopidx].reshape(size,-1) if len(arr.shape)>1 else arr[startidx:stopidx])
             save_sliced_arr('box.npy',box)
             save_sliced_arr('coord.npy',coord)
             save_sliced_arr('energy.npy',energy)
             save_sliced_arr('force.npy',force)
-        write_dict=self.inputs.get_dict()
+        write_dict=self.inputs.param.get_dict()
         write_dict['systems']=['.']
         write_dict['set_prefix']='set'
         write_dict['save_ckpt']='model.ckpt'

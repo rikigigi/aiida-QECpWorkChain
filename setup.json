@@ -18,10 +18,10 @@
             "QECpWorkChain = aiida_QECpWorkChain.workflow:CpWorkChain"
         ],
         "aiida.calculations": [
-            "DeepMdTrain = aiida_QECpWorkChain.workflow:DeepMdTrainCalculation"
+            "DeepMdTrain = aiida_QECpWorkChain.deepmd:DeepMdTrainCalculation"
         ],
         "aiida.parsers": [
-            "DeepMdTrainParser = aiida_QECpWorkChain.workflow:DeepMdTrainParser"
+            "DeepMdTrainParser = aiida_QECpWorkChain.deepmd:DeepMdTrainParser"
         ]
     },
     "include_package_data": true,
