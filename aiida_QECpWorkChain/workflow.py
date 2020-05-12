@@ -1585,6 +1585,7 @@ currently only the first element of the list is used.
             return
         nose_ps_done=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         # run the thermostat
+        ibrav = self.ctx.last_nve[-1].inputs.parameters.get_dict()['SYSTEM'].get('ibrav',0)
         nose_pr_param={
             'CONTROL': {
                 'calculation': 'vc-cp',
@@ -1598,7 +1599,7 @@ currently only the first element of the list is used.
             'CELL': {
                 'cell_dynamics': 'pr',
                 'press': float(self.inputs.pressure),
-                'cell_dofree': 'volume',
+                'cell_dofree': 'volume' if ibrav == 1 else 'xyz',
             },
         }
         dt,emass,off=self.ctx.dt_emass_off

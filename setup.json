@@ -16,6 +16,12 @@
     "entry_points": {
         "aiida.workflows": [
             "QECpWorkChain = aiida_QECpWorkChain.workflow:CpWorkChain"
+        ],
+        "aiida.calculations": [
+            "DeepMdTrain = aiida_QECpWorkChain.workflow:DeepMdTrainCalculation"
+        ],
+        "aiida.parsers": [
+            "DeepMdTrainParser = aiida_QECpWorkChain.workflow:DeepMdTrainParser"
         ]
     },
     "include_package_data": true,
