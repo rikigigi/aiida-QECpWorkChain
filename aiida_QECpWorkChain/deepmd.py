@@ -43,6 +43,17 @@ class DeepMdTrainCalculation(CalcJob):
             save_sliced_arr('coord.npy',coord)
             save_sliced_arr('energy.npy',energy)
             save_sliced_arr('force.npy',force)
+        #write types of atoms
+        def create_id(traj):
+            l=[]; sp={}; nidx=0
+            for s in traj.symbols:
+                idx=sp.setdefault(s,nidx)
+                if idx==nidx: nidx = nidx +1
+                l.append(idx)
+            return l
+
+        with folder.open('type.raw','w') as handle:
+            np.savetxt(handle, create_id(self.inputs.traj))
         write_dict=self.inputs.param.get_dict()
         write_dict['systems']=['.']
         write_dict['set_prefix']='set'
