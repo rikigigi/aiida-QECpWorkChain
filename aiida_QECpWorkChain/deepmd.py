@@ -14,13 +14,13 @@ class DeepMdTrainCalculation(CalcJob):
     @classmethod
     def define(cls, spec):
         super().define(spec)
-        spec.input('traj', required=False, valid_type=(TrajectoryData) )
-        spec.input('param', required=True, valid_type=(Dict))
+        spec.input('traj', required=False, valid_type=(TrajectoryData), help='If the training is started from scratch, this will create the input file starting from this raw trajectories. The following arrays names must be present: forces, cells, positions and scf_total_energy (the potential energy that the network has to learn). If the training is restarted from a previous calculation, this input is not needed.' )
+        spec.input('param', required=True, valid_type=(Dict), help='Input dictionary, as documented in the deepmd package. The parameters that set the names of the various input file are setted by this plugin.')
         spec.input('nline_per_set', default=lambda : Int(2000), valid_type=(Int))
         spec.input('metadata.options.parser_name', valid_type=six.string_types, default='DeepMdTrainParser')
         spec.input('metadata.options.input_filename', valid_type=str, default='aiida.in')
         spec.input('metadata.options.output_filename', valid_type=str, default='aiida.out')
-        spec.input('restart_calculation_folder', valid_type=aiida.orm.RemoteData, required=False)
+        spec.input('restart_calculation_folder', valid_type=aiida.orm.RemoteData, required=False, help='If provided the training procedure will restart using the data that is present in this folder (you can find the folder in the outputs of the completed calculation, as well as the calculated network weights)')
         spec.output('lcurve',valid_type=ArrayData)
         spec.output('param',valid_type=Dict)
         spec.exit_code(400,'ERROR_NO_TRAINING_DATA','You must provide the training set with a restart or with a trajectory data')
