@@ -396,34 +396,36 @@ def get_children_trajectory(node):
     return get_children_nodetype(node,aiida.orm.nodes.data.TrajectoryData)
 
 
-def get_parent_nodetype(node,nodetype):
+def get_parent_nodetype(node, nodetype, minpk=0):
     '''
         Find in a recursive way all nodetype nodes that are in the input tree of node.
         The recursion is stopped when the node has no inputs or it is a nodetype node,
-        otherwise it will go to every parent node.
+        otherwise it will go to every parent node. Recursion is stopped if pk is less than minpk
     '''
     if isinstance(node, list):
         res=[]
         for n in node:
-            res=res+get_parent_nodetype(n,nodetype)
+            res=res+get_parent_nodetype(n,nodetype,minpk)
         return res
     if not isinstance(node, nodetype):
         incoming=node.get_incoming().all_nodes()
         res=[]
         for i in incoming:
-            res = res + get_parent_nodetype(i,nodetype)
+            if i.pk < minpk:
+                continue
+            res = res + get_parent_nodetype(i,nodetype,minpk)
         return res
     else:
         return [node]
     
-def get_parent_calculation(node):
-    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcjob.CalcJobNode)
+def get_parent_calculation(node, minpk=0):
+    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcjob.CalcJobNode,minpk)
 
-def get_parent_calcfunction(node):
-    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcfunction.CalcFunctionNode)
+def get_parent_calcfunction(node, minpk=0):
+    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcfunction.CalcFunctionNode,minpk)
 
-def get_parent_trajectory(node):
-    return get_parent_nodetype(node,aiida.orm.nodes.data.TrajectoryData)
+def get_parent_trajectory(node, minpk=0):
+    return get_parent_nodetype(node,aiida.orm.nodes.data.TrajectoryData,minpk)
 
 def get_atomic_types_and_masks(type_array):
     names=set(type_array)
@@ -436,15 +438,15 @@ def get_atomic_types_and_masks(type_array):
 
 
 #compare forces between reference pw calculation and cp one
-def compare_forces(pwcalc):
+def compare_forces(pwcalc,minpk=0):
     #get cp trajectory (I am assuming that the graph is as I made it)
-    parent_traj=get_parent_trajectory(pwcalc.get_incoming().all_nodes())
+    parent_traj=get_parent_trajectory(pwcalc.get_incoming().all_nodes(),minpk)
     #get calcfunctions (one of them has the index of the step)
-    parent_calcfunctions=get_parent_calcfunction(pwcalc.get_incoming().all_nodes())
+    parent_calcfunctions=get_parent_calcfunction(pwcalc.get_incoming().all_nodes(),minpk)
     if len(parent_traj) != 1:
         raise RuntimeError('wrong number of direct parent trajectories in the graph ({})'.format(len(parent_traj)))
     #get parent cp calculation
-    parent_cp=get_parent_calculation(parent_traj)
+    parent_cp=get_parent_calculation(parent_traj,minpk)
     if len(parent_cp) != 1:
         raise RuntimeError('wrong number of direct parent calculations in the graph ({})'.format(len(parent_cp)))
     emass=parent_cp[0].inputs.parameters['ELECTRONS']['emass']
@@ -471,7 +473,7 @@ def compare_forces(pwcalc):
         res.append( (name, forces_pw_arr[0][mask], forces_cp[mask]/forces_pw_arr[0][mask]) )
     return res, emass, pk, dt
 
-def compare_forces_many(submitted):
+def compare_forces_many(submitted, minpk=0):
     '''
     Given a list of submitted pw jobs, find the original cp trajectory and
     get the forces and the cp/pw force ratio for comparison.
@@ -483,7 +485,7 @@ def compare_forces_many(submitted):
     atom_forces={}
     for sub in submitted:
         if sub.is_finished_ok or sub.exit_status == 322 :
-            list_ratios, emass, pk, dt = compare_forces(sub)
+            list_ratios, emass, pk, dt = compare_forces(sub,minpk)
             atom=atom_forces.setdefault(emass,{}).setdefault(dt,{'fratios':{},'forces':{}})['fratios']
             forces=atom_forces.setdefault(emass,{}).setdefault(dt,{'fratios':{},'forces':{}})['forces']
             atom_forces[emass][dt].setdefault('PK',set()).add(pk)
@@ -502,12 +504,12 @@ def compare_forces_many(submitted):
     return atom_forces
 
 
-def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax=None):
+def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax=None,minpk=0):
     '''
     Given a list of pw calcjobs, analyzes the force ratios between them and their cp ancestors.
     Produces a series of histogram plots and mean and standard deviation of the ratio in an output dictionary.
     '''
-    atom_forces=compare_forces_many(pwcalcjobs)
+    atom_forces=compare_forces_many(pwcalcjobs, minpk)
     res={}
     for emass in atom_forces.keys():
         for dt in atom_forces[emass].keys():
@@ -713,8 +715,8 @@ def get_calc_from_emass_dt(res,emass,dt):
             candidate=get_node(pk_max)
     return candidate
 
-def get_parent_calc_from_emass_dt(res,emass,dt):
-    startfrom=get_parent_calculation(get_calc_from_emass_dt(res,emass,dt).get_incoming().all_nodes())
+def get_parent_calc_from_emass_dt(res,emass,dt,minpk=0):
+    startfrom=get_parent_calculation(get_calc_from_emass_dt(res,emass,dt).get_incoming().all_nodes(),minpk)
     if len(startfrom) != 1:
         raise RuntimeError('Bug: wrong logic')
     return startfrom
@@ -1304,7 +1306,7 @@ currently only the first element of the list is used.
         self.report('[analysis_step] maximum of vibrational spectra: {}'.format(vdos_maxs))
         #analyze forces ratio
         self.report('[analysis_step] comparing {} pw...'.format(len(self.ctx.compare_pw)))
-        res_1 = analyze_forces_ratio(self.ctx.compare_pw)
+        res_1 = analyze_forces_ratio(self.ctx.compare_pw, minpk=self.node.pk)
         target_force_ratio=float(self.inputs.target_force_ratio)
         
         fratio_threshold=0.05
@@ -1363,7 +1365,7 @@ currently only the first element of the list is used.
                 if test(emass,dt,calc):
                     #do something with the parameters to try a fix
                     dt,emass=fix(dt,emass)
-                    startfrom=get_parent_calculation(calc.get_incoming().all_nodes())
+                    startfrom=get_parent_calculation(calc.get_incoming().all_nodes(),minpk=self.node.pk)
                     if len(startfrom) != 1:                    
                         raise RuntimeError('Bug: wrong logic') 
                     params=copy.deepcopy(self.get_cp_resources_cp())
@@ -1403,7 +1405,7 @@ currently only the first element of the list is used.
                 dt_big=max(list(res_1[too_big_smallest_emass].keys()))
                 new_dt=dt_big*(3.0/4.0)**0.5
                 #get a calculation from wich we can start. pick the first one
-                startfrom=get_parent_calc_from_emass_dt(res_1,too_big_smallest_emass,dt_big)
+                startfrom=get_parent_calc_from_emass_dt(res_1,too_big_smallest_emass,dt_big,minpk=self.node.pk)
                 params=copy.deepcopy(self.get_cp_resources_cp())
                 params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
@@ -1426,7 +1428,7 @@ currently only the first element of the list is used.
                 dt_big=max(list(res_1[too_big_smallest_emass].keys()))
                 new_dt=(dt_small+dt_big)/2.0
                 #get a calculation from wich we can start. pick the first one
-                startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small)
+                startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small,minpk=self.node.pk)
                 params=copy.deepcopy(self.get_cp_resources_cp())
                 params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
@@ -1448,7 +1450,7 @@ currently only the first element of the list is used.
                 dt_small=max(list(res_1[too_small_biggest_emass].keys()))
                 new_dt=dt_small*(4.0/3.0)**0.5
                 #get a calculation from wich we can start. pick the first one
-                startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small)
+                startfrom=get_parent_calc_from_emass_dt(res_1,too_small_biggest_emass,dt_small, minpk=self.node.pk)
                 params=copy.deepcopy(self.get_cp_resources_cp())
                 params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
                 newcalc=configure_cp_builder_restart(           
