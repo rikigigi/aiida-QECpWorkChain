@@ -1,18 +1,3 @@
-[![Build Status](https://github.com/rikigigi/aiida-QECpWorkChain/workflows/ci/badge.svg?branch=master)](https://travis-ci.org/rikigigi/aiida-QECpWorkChain/actions)
-[![Coverage Status](https://coveralls.io/repos/github/rikigigi/aiida-QECpWorkChain/badge.svg?branch=master)](https://coveralls.io/github/rikigigi/aiida-QECpWorkChain?branch=master)
-[![Docs status](https://readthedocs.org/projects/aiida-QECpWorkChain/badge)](http://aiida-QECpWorkChain.readthedocs.io/)
-[![PyPI version](https://badge.fury.io/py/aiida-QECpWorkChain.svg)](https://badge.fury.io/py/aiida-QECpWorkChain)
-
-# aiida-QECpWorkChain
-
-Car-Parrinello Work Chain
-
-## Usage
-
-Here goes a complete example of how to submit a test calculation using this plugin.
-
-A quick demo of how to submit a calculation:
-```python
 import sys
 import pymatgen as pmg
 import numpy as np
@@ -97,6 +82,3 @@ build.number_of_pw_per_trajectory=Int(15)
 build.nve_required_picoseconds=Float(10.0)
 res=submit(build)
 print ('workflow {} submitted (cross your fingers)'.format(res))
-
-
-```
