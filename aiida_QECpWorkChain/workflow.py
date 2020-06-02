@@ -172,25 +172,30 @@ def configure_cp_builder_cg(code,
 #        'cell_dynamics' : 'none',
 #    },
     }
+    settings={}
+    autopilot=None
     if ion_velocities is not None:
-        builder.settings = Dict(dict={'ATOMIC_VELOCITIES':ion_velocities})
+        settings['ATOMIC_VELOCITIES']=ion_velocities
     if nstep>22:
-        parameters['AUTOPILOT'] = [
+        autopilot = [
         {'onstep' : 7, 'what' : 'dt', 'newvalue' : 6.0 },
         {'onstep' : 14, 'what' : 'dt', 'newvalue' : 18.0},
         {'onstep' : 21, 'what' : 'dt', 'newvalue' : 60.0},
         {'onstep' : nstep-1, 'what' : 'dt', 'newvalue' : dt},
         ]
     elif nstep>10:
-        parameters['AUTOPILOT'] = [
+        autopilot = [
         {'onstep' : 7, 'what' : 'dt', 'newvalue' : 15.0 },
         {'onstep' : nstep-1, 'what' : 'dt', 'newvalue' : dt},
         ]
-        
+    if autopilot is not None:
+        settings['AUTOPILOT']=autopilot
     
     for key in additional_parameters.keys():
         for subkey in additional_parameters[key].keys():
             parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
+
+    builder.settings = Dict(dict=settings)
     builder.parameters = Dict(dict=parameters)
     builder.metadata.options.resources = resources['resources']
     builder.metadata.options.max_wallclock_seconds = resources['wallclock']
@@ -250,7 +255,9 @@ def configure_cp_builder_restart(code,
     #}
     #builder.settings = Dict(dict=settings_dict)
     if 'settings' in start_from.inputs:
-        builder.settings=start_from.inputs.settings.clone()
+        settings=start_from.inputs.settings.get_dict()
+    else:
+        settings={}
     if resources is not None:
         resources_=resources['resources']
         queue=     resources['queue']
@@ -285,22 +292,10 @@ def configure_cp_builder_restart(code,
             builder.structure=new_structure
             #set velocities
             ion_velocities=(extract_velocities_from_trajectory(start_from.outputs.output_trajectory).get_array('velocities')*qeunits.timeau_to_sec*1.0e12).tolist()
-            if builder.settings is None:
-                builder.settings=Dict(dict={'ATOMIC_VELOCITIES':
-                                         ion_velocities
-                                      })
-            else:
-                tdict=builder.settings.get_dict()
-                tdict['ATOMIC_VELOCITIES']=ion_velocities
-                builder.settings.set_dict(tdict)
+            settings['ATOMIC_VELOCITIES']=ion_velocities
 
     if cmdline is not None:
-        if builder.settings is None:
-            builder.settings=Dict(dict={'cmdline':cmdline})
-        else:
-            tdict=builder.settings.get_dict()
-            tdict['cmdline']=cmdline
-            builder.settings.set_dict(tdict)
+        settings['cmdline']=cmdline
     
     builder.pseudos = get_pseudo_from_inputs(start_from)
     parameters = copy.deepcopy(start_from.inputs.parameters.get_dict())
@@ -331,7 +326,7 @@ def configure_cp_builder_restart(code,
         parameters['CONTROL']['dt'] = dt
     if remove_autopilot:
         try:
-            del parameters['AUTOPILOT']
+            del settings['AUTOPILOT']
             print ('removed AUTOPILOT input')
         except:
             print ('no AUTOPILOT input to remove')
@@ -357,6 +352,7 @@ def configure_cp_builder_restart(code,
     parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
         
     builder.parameters = Dict(dict=parameters)
+    builder.settings = Dict(dict=settings)
     builder.metadata.options.resources = resources_
     builder.metadata.options.max_wallclock_seconds = int(wallclock)
     builder.metadata.options.queue_name = queue
