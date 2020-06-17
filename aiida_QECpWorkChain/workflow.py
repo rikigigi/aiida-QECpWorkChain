@@ -533,8 +533,28 @@ def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax=None,minpk=
     else:
         return res
 
-def check_econt(cpcalcjob):
-    pass    
+
+def ekinc_const_motion_analysis(traj):
+    """Convert electronic kinetic energy in K and then does a fit.
+    Returns angular coefficient in K/ps.
+    This is the true quantity that you are interested in, since this
+    is the temperature that the ionic system is going to lose because of 
+    the coupling between electrons and ions
+    Then does the same thing for the constant of motion.
+    With those two numbers you are able to decide if your timestep
+    and your emass are good or not.
+    """
+    natoms=traj.numsites
+    #conversion factor from eV to K
+    k_b=8.617333262145e-5 #eV/K
+    eV_to_K=2/(3*k_b*natoms)
+    tps=traj.get_array('times') #in ps
+    ekinc=traj.get_array('electronic_kinetic_energy')*eV_to_K #now in K
+    cmot=traj.get_array('energy_constant_motion')*eV_to_K #now in K
+    
+    fit_ekinc=np.polyfit(tps,ekinc,1)
+    fit_cmot=np.polyfit(tps,cmot,1)
+    return fit_ekinc, fit_cmot
 
 #various calcfunctions
 
@@ -1027,6 +1047,8 @@ currently only the first element of the list is used.
         spec.input('nstep_parallel_test',valid_type=(Int), default=lambda: Int(200))
         spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0),help='time requested to the scheduler during the test for finding the best parallelization parameters.')
         spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0),help='same as benchmark_parallel_walltime_s but for dermining the best electronic mass and timestep.')
+        spec.input('max_slope_ekinc',valid_type=(Float), default=lambda: Float(0.1),help='max slope in K/ps of the ekinc linear fit')
+        spec.input('max_slope_const',valid_type=(Float), default=lambda: Float(0.05),help='max slope in K/ps of the constant of motion linear fit')
 
         spec.outline(
             cls.setup,
@@ -1058,7 +1080,17 @@ currently only the first element of the list is used.
                 cls.final_cg,# append to ctx.last_nve
                 cls.check_final_cg,
                 while_(cls.check_nve_nose)(
-                    cls.run_nve # append to ctx.last_nve
+                    cls.run_nve, # append to ctx.last_nve #set new masses of ion if self.ctx.find_new_ion_masses is True
+                    # check slope of ekinc and econt, correct and eventually do a new final_cg
+                    cls.prepare_check_slope,
+                    cls.check_slope,
+                    if_(cls.check_slope_not_ok)(
+                        #change emass and dt
+                        cls.final_cg,
+                        cls.prepare_find_new_masses, # do a small cp
+                        cls.compare_forces_pw, #takes trajectory from self.ctx.dt_benchmark!
+                        cls.find_new_ion_masses #set new ions masses according to force ratio # ratio are in self.ctx.ionic_mass_corr
+                    )
                 )
             ),
             cls.setup_check2, #everything will start from ctx.last_nve[-1]
@@ -1079,6 +1111,7 @@ currently only the first element of the list is used.
         spec.exit_code(406, 'ERROR_WRONG_INPUT', message='Wrong input parameters')
         spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
         spec.exit_code(408, 'ERROR_MULTIPLE_FAIL', message='Multiple errors in the simulation that cannot fix.')
+        spec.exit_code(409, 'ERROR_WRONG_LOGIC', message='This is a bug in the workchain.')
         spec.output('nve_prod_traj')
         spec.output('full_traj')
         spec.output('dt')
@@ -1289,10 +1322,83 @@ currently only the first element of the list is used.
         print (self.ctx.__dict__)
         print ('return value from analysis_step: ',res)
 
-    def analysis_step(self):
+    def prepare_check_slope(self):
+        self.ctx.check_slope_simulation=self.ctx.last_nve[-1]
 
+    def check_slope(self):
+        self.report('[check_slope] beginning')
+        self.ctx.max_slope_ok=True
+        if 'check_slope_simulation' in self.cxt:
+           sim=self.ctx.check_slope_simulation
+           if not sim.is_finished_ok:
+               self.report('[check_slope] simulation to check is not finished ok!')
+               return 404
+           self.ctx.max_slope_emass=sim.inputs.parameters['ELECTRONS']['emass']
+           self.ctx.max_slope_dt=sim.inputs.parameters['CONTROL']['dt']
+           self.ctx.max_slope_emass_cut=sim.inputs.parameters['ELECTRONS']['emass_cutoff']
+           traj=sim.outputs.output_trajectory 
+           ek, cm = ekinc_const_motion_analysis(traj)
+           if abs(ek[1]) > float(self.inputs.max_slope_ekinc):
+               #try to decrease ekinc slope by decreasing emass
+               self.ctx.max_slope_ok=False
+               self.ctx.max_slope_emass=self.ctx.max_slope_emass*2.0/3.0
+               self.ctx.max_slope_dt=self.ctx.max_slope_dt*(2.0/3.0)**0.5
+               self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
+               return
+           if abs(cm[1]) > float (self.inputs.max_slope_const):
+               self.ctx.max_slope_ok=False 
+               self.ctx.max_slope_dt=self.ctx.max_slope_dt*2.0/3.0
+               self.report('[check_slope] econs too steepy: correcting dt to {}'.format(self.ctx.max_slope_dt))
+               return
+           self.report('[check_slope] slope ok: (ekinc, econs) = ({}, {})'.format(ek,cm))
+        else:
+           self.report('[check_slope] nothing to do')
+
+    def check_slope_not_ok(self):
+        return not self.ctx.max_slope_ok
+
+    def prepare_find_new_masses(self):
+        params=copy.deepcopy(self.get_cp_resources_cp())
+        params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
+        
+        newcalc=configure_cp_builder_restart(
+                   self.get_cp_code(),
+                   self.ctx.last_nve[-1],
+                   resources=params,
+                   copy_mu_mucut=True,
+                   cmdline=self.ctx.cmdline_cp,
+                   print= lambda x : self.report('[prepare_find_new_masses] [builder] {}'.format(x))
+            )
+        submitted=self.submit(newcalc)
+        self.to_context(last_nve=append_(submitted))
+        self.ctx.compare_pw=[]
+        self.ctx.min_pk=submitted.pk-1
+        self.ctx.dt_benchmark=[submitted] # so compare_forces_pw can start from there
+        
+    def find_new_ion_masses(self):
+        self.ctx.find_new_ion_masses=True
+        res_1 = analyze_forces_ratio(self.ctx.compare_pw, minpk=self.ctx.min_pk)#=self.node.pk)
+        #there should be 1 emass and one dt. check it
+        if len(res_1.keys()) != 1:
+            return 409
+        emass_=list(res_1.keys())[0] 
+        res_2=res_1[emass_]
+        if len(res_2.keys()) != 1:
+            return 409
+        dt_=list(res_2.keys())[0] 
+        params=res_2[dt_]
+        self.ctx.dt=dt_
+        self.ctx.emass=emass_
+        #generate dictionary for ionic mass correction
+        new_mass={}
+        for p in params.keys():
+            new_mass[p]=params[p]['fratios_mean']
+        self.ctx.ionic_mass_corr=new_mass
+        self.report('[analysis_step] mass_corrections={}'.format(new_mass))
+         
+
+    def analysis_step(self):
         self.report('[analysis_step] beginnig')
- 
         #calculate vibrational spectra to have nice nose frequencies. Simply pick the frequency of the maximum
         vdos_maxs={}
         for calc in self.ctx.dt_benchmark:
@@ -1394,6 +1500,7 @@ currently only the first element of the list is used.
                 #1. I have to use smaller emass, or the smaller emasses did not have a small enought timestep
                 #find if there is a broken simulation with emass lower than the current minimum
                 self.report('[analysis_step] try to decrease emass')
+		#TODO is this bugged? will the workchain resubmit always the same calculation over and over, as well as new ones?
                 if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ < too_big_smallest_emass and not calc_.is_finished_ok):
                     return # do it!
                 # pick something lower and run it again!
@@ -1480,8 +1587,8 @@ currently only the first element of the list is used.
             dt_.store()
             emass_=Float(best[1])
             emass_.store()
-            self.out('dt',dt_)
-            self.out('emass',emass_)
+            self.ctx.dt=dt_
+            self.ctx.emass=emass_
             #generate dictionary for ionic mass correction
             params=res_1[best[1]][best[0]]
             new_mass={}
@@ -1634,6 +1741,8 @@ currently only the first element of the list is used.
             return False
         
     def check_nve_nose(self):
+        if not self.ctx.max_slope_ok:
+            return True
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nose_number=len(self.ctx.last_nve)-self.ctx.first_prod_nve_idx
         #if necessary, get timestep walltime
@@ -1659,20 +1768,32 @@ currently only the first element of the list is used.
         if not 'cg_scratch' in self.ctx:
             self.ctx.cg_scratch=False 
 
+        if 'max_slope_ok' in self.ctx:
+            if self.ctx.max_slope_ok:
+                cg_reset_emass_dt=False
+            else:
+                cg_reset_emass_dt=True
+        else:
+            cg_reset_emass_dt=False
+            
+        
         final_cg=configure_cp_builder_restart(
                    self.get_cp_code(),
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cg(),
-                   copy_mu_mucut=True,
+                   copy_mu_mucut=False if cg_reset_emass_dt else True ,
+                   dt= self.ctx.max_slope_dt if cg_reset_emass_dt else None,
+                   mu=self.ctx.max_slope_emass if cg_reset_emass_dt else None,
+                   mucut=self.ctx.max_slope_emass_cut if cg_reset_emass_dt else None,
                    cg=True,
                    tstress=False,
-                   from_scratch=True if self.ctx.cg_scratch else False,
+                   from_scratch=True if (self.ctx.cg_scratch or cg_reset_emass_dt) else False,
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
                    additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
                    cmdline=['-ntg', '1', '-nb', '1']            )
         self.to_context(last_nve=append_(self.submit(final_cg)))
-        if self.ctx.cg_scratch:
+        if self.ctx.cg_scratch or cg_reset_emass_dt:
             #reset time per timestep
             del(self.ctx.stepwalltime_s)
             del(self.ctx.stepwalltime_nose_s) 
@@ -1728,6 +1849,14 @@ currently only the first element of the list is used.
             if res>400:
                 return res
             return
+        if not 'find_new_ion_masses' in self.ctx:
+            self.ctx.find_new_ion_masses=False
+        if self.ctx.find_new_ion_masses:
+            self.ctx.find_new_ion_masses=False 
+            s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
+        else:
+            s=None
+
         nve_ps_done=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nve=configure_cp_builder_restart(
                    self.get_cp_code(),
@@ -1737,7 +1866,8 @@ currently only the first element of the list is used.
                    cmdline=self.ctx.cmdline_cp,
                    ttot_ps=abs(self.ctx.run_nve_ps-nve_ps_done),
                    stepwalltime_s= self.ctx.stepwalltime_s if 'stepwalltime_s' in self.ctx else None,
-                   print= lambda x : self.report('[run_nve] [builder] {}'.format(x))
+                   print= lambda x : self.report('[run_nve] [builder] {}'.format(x)),
+                   structure=s
             )
         self.to_context(last_nve=append_(self.submit(nve))) 
         self.report('[run_nve] nve to context')
@@ -1806,6 +1936,8 @@ currently only the first element of the list is used.
  
     def get_result(self):
         self.report('[get_result] workflow terminated. Preparing outputs.')
+        self.out('dt',self.ctx.dt)
+        self.out('emass',self.ctx.emass)
         #merge all nve trajectories
         res=merge_many_traj(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         self.out('nve_prod_traj', res)
