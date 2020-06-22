@@ -318,11 +318,12 @@ def configure_cp_builder_restart(code,
         parameters['ELECTRONS']['emass_cutoff'] = mucut
     elif not 'emass' in start_from.inputs.parameters['ELECTRONS']:
         raise ValueError('emass parameter not found in input dictionary!')
-    if dt is not None and not from_scratch:
-        if abs(parameters['CONTROL']['dt'] - dt) > 1e-5 and dtchange:
-            parameters['IONS']['ion_velocities'] = 'change_step'
-            parameters['IONS']['tolp'] = parameters['CONTROL']['dt']
-            parameters['ELECTRONS']['electron_velocities'] = 'change_step'
+    if dt is not None:
+        if not from_scratch:
+            if abs(parameters['CONTROL']['dt'] - dt) > 1e-5 and dtchange:
+                parameters['IONS']['ion_velocities'] = 'change_step'
+                parameters['IONS']['tolp'] = parameters['CONTROL']['dt']
+                parameters['ELECTRONS']['electron_velocities'] = 'change_step'
         parameters['CONTROL']['dt'] = dt
     if remove_autopilot:
         try:
@@ -1328,7 +1329,7 @@ currently only the first element of the list is used.
     def check_slope(self):
         self.report('[check_slope] beginning')
         self.ctx.max_slope_ok=True
-        if 'check_slope_simulation' in self.cxt:
+        if 'check_slope_simulation' in self.ctx:
            sim=self.ctx.check_slope_simulation
            if not sim.is_finished_ok:
                self.report('[check_slope] simulation to check is not finished ok!')
@@ -1338,14 +1339,15 @@ currently only the first element of the list is used.
            self.ctx.max_slope_emass_cut=sim.inputs.parameters['ELECTRONS']['emass_cutoff']
            traj=sim.outputs.output_trajectory 
            ek, cm = ekinc_const_motion_analysis(traj)
-           if abs(ek[1]) > float(self.inputs.max_slope_ekinc):
+           self.report('[check_slope] (ekinc, econs) linear fit = ({}, {})'.format(ek, cm))
+           if abs(ek[0]) > float(self.inputs.max_slope_ekinc):
                #try to decrease ekinc slope by decreasing emass
                self.ctx.max_slope_ok=False
                self.ctx.max_slope_emass=self.ctx.max_slope_emass*2.0/3.0
                self.ctx.max_slope_dt=self.ctx.max_slope_dt*(2.0/3.0)**0.5
                self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
                return
-           if abs(cm[1]) > float (self.inputs.max_slope_const):
+           if abs(cm[0]) > float (self.inputs.max_slope_const):
                self.ctx.max_slope_ok=False 
                self.ctx.max_slope_dt=self.ctx.max_slope_dt*2.0/3.0
                self.report('[check_slope] econs too steepy: correcting dt to {}'.format(self.ctx.max_slope_dt))
@@ -1741,8 +1743,9 @@ currently only the first element of the list is used.
             return False
         
     def check_nve_nose(self):
-        if not self.ctx.max_slope_ok:
-            return True
+        if 'max_slope_ok' in self.ctx:
+            if not self.ctx.max_slope_ok:
+                return True
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nose_number=len(self.ctx.last_nve)-self.ctx.first_prod_nve_idx
         #if necessary, get timestep walltime
@@ -1795,8 +1798,10 @@ currently only the first element of the list is used.
         self.to_context(last_nve=append_(self.submit(final_cg)))
         if self.ctx.cg_scratch or cg_reset_emass_dt:
             #reset time per timestep
-            del(self.ctx.stepwalltime_s)
-            del(self.ctx.stepwalltime_nose_s) 
+            if 'stepwalltime_s' in self.ctx:
+                del(self.ctx.stepwalltime_s)
+            if 'stepwalltime_nose_s' in self.ctx:
+                del(self.ctx.stepwalltime_nose_s) 
         self.ctx.cg_scratch=False
         self.report('[final_cg] cg to context (1 step).')
         return
