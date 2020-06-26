@@ -1050,6 +1050,8 @@ currently only the first element of the list is used.
         spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0),help='same as benchmark_parallel_walltime_s but for dermining the best electronic mass and timestep.')
         spec.input('max_slope_ekinc',valid_type=(Float), default=lambda: Float(0.1),help='max slope in K/ps of the ekinc linear fit')
         spec.input('max_slope_const',valid_type=(Float), default=lambda: Float(0.05),help='max slope in K/ps of the constant of motion linear fit')
+        spec.input('max_slope_min_ps',valid_type=(Float), default=lambda: Float(1.0),help='minimum required lenght in ps of the last trajectory to do the linear fit on ekinc and const of motion')
+        spec.input('max_slope_min_emass',valid_type=(Float), default=lambda: Float(50.0),help='minimum possible value of electronic mass that can be set by the max_slope correction routine')
 
         spec.outline(
             cls.setup,
@@ -1220,7 +1222,7 @@ currently only the first element of the list is used.
         node = self.submit(builder)
         self.to_context(initial_cg=node)
         
-        self.report('[small_equilibration] cg sent to context')
+        self.report('[small_equilibration] pk={} cg sent to context'.format(node.pk))
         return
 
     def emass_benchmark(self):
@@ -1243,8 +1245,9 @@ currently only the first element of the list is used.
                                                resources=params,
                                                cmdline=self.ctx.cmdline_cp
                                              )
-            self.to_context(emass_benchmark=append_(self.submit(calc)))
-            self.report('[emass_benchmark] emass={} sent to context'.format(mu))
+            sub=self.submit(calc)
+            self.to_context(emass_benchmark=append_(sub))
+            self.report('[emass_benchmark] pk={} emass={} sent to context'.format(sub.pk,mu))
            
         #apply first correction of atomic mass
         return
@@ -1265,7 +1268,9 @@ currently only the first element of the list is used.
                                                    dt=dt,
                                                    cmdline=self.ctx.cmdline_cp
                                                    )
-                    self.to_context(dt_benchmark=append_(self.submit(newcalc)))
+                    sub=self.submit(newcalc)
+                    self.to_context(dt_benchmark=append_(sub))
+                    self.report('[dt_benchmark] submitted pk={} emass={} dt={}'.format(sub.pk,mu,dt))
             else:
                 self.report('[dt_benchmark] calculation with pk={} emass={} dt={} failed'.format(pk,mu,dt))
 
@@ -1339,20 +1344,33 @@ currently only the first element of the list is used.
            self.ctx.max_slope_emass_cut=sim.inputs.parameters['ELECTRONS']['emass_cutoff']
            traj=sim.outputs.output_trajectory 
            ek, cm = ekinc_const_motion_analysis(traj)
-           self.report('[check_slope] (ekinc, econs) linear fit = ({}, {})'.format(ek, cm))
-           if abs(ek[0]) > float(self.inputs.max_slope_ekinc):
-               #try to decrease ekinc slope by decreasing emass
-               self.ctx.max_slope_ok=False
-               self.ctx.max_slope_emass=self.ctx.max_slope_emass*2.0/3.0
-               self.ctx.max_slope_dt=self.ctx.max_slope_dt*(2.0/3.0)**0.5
-               self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
-               return
-           if abs(cm[0]) > float (self.inputs.max_slope_const):
-               self.ctx.max_slope_ok=False 
-               self.ctx.max_slope_dt=self.ctx.max_slope_dt*2.0/3.0
-               self.report('[check_slope] econs too steepy: correcting dt to {}'.format(self.ctx.max_slope_dt))
-               return
-           self.report('[check_slope] slope ok: (ekinc, econs) = ({}, {})'.format(ek,cm))
+           self.report('[check_slope] pk={} (ekinc, econs) linear fit = ({}, {})'.format(sim.pk,ek, cm))
+           tps=get_total_time([sim])
+           if tps<float(self.inputs.max_slope_min_ps):
+               self.report('[check_slope] the simulation is not long enough: not considering the result of the linear fit')
+           else:
+               if abs(ek[0]) > float(self.inputs.max_slope_ekinc):
+                   #try to decrease ekinc slope by decreasing emass
+                   self.ctx.max_slope_ok=False
+                   fac=2.0/3.0
+                   new_emass=self.ctx.max_slope_emass*fac
+                   if new_emass<float(self.inputs.max_slope_min_emass):
+                       self.report('[max_slope] I will not go under the required minimum electronic mass specified in the input.')
+                       if self.ctx.max_slope_emass > float(self.inputs.max_slope_min_emass):
+                           fac=float(self.inputs.max_slope_min_emass)/self.ctx.max_slope_emass
+                           self.report('[max_slope] setting minimum allowed electronic mass')
+                       
+                   self.ctx.max_slope_emass=self.ctx.max_slope_emass*fac
+                   self.ctx.max_slope_dt=self.ctx.max_slope_dt*(fac)**0.5
+                   self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
+                   return
+               if abs(cm[0]) > float (self.inputs.max_slope_const):
+                   self.ctx.max_slope_ok=False 
+                   self.ctx.max_slope_dt=self.ctx.max_slope_dt*2.0/3.0
+                   self.report('[check_slope] econs too steepy: correcting dt to {}'.format(self.ctx.max_slope_dt))
+                   return
+               self.report('[check_slope] slope ok: (ekinc, econs) = ({}, {})'.format(ek,cm))
+           del(self.ctx.check_slope_simulation)
         else:
            self.report('[check_slope] nothing to do')
 
@@ -1372,6 +1390,7 @@ currently only the first element of the list is used.
                    print= lambda x : self.report('[prepare_find_new_masses] [builder] {}'.format(x))
             )
         submitted=self.submit(newcalc)
+        self.report('[prepare_find_new_masses] submitted pk={}'.format(submitted.pk))
         self.to_context(last_nve=append_(submitted))
         self.ctx.compare_pw=[]
         self.ctx.min_pk=submitted.pk-1
@@ -1478,11 +1497,13 @@ currently only the first element of the list is used.
                                self.get_cp_code(),                  
                                startfrom[0],                        
                                resources=params,
-                               dt=dt, mu=emass                      
+                               dt=dt, mu=emass,
+                               print= lambda x : self.report('[analysis_step.try_to_fix] [builder] {}'.format(x))
                             )                                            
-                    self.to_context(dt_benchmark=append_(self.submit(newcalc)))
+                    sub=self.submit(newcalc)
+                    self.to_context(dt_benchmark=append_(sub))
                     have_something_to_do=True
-                    self.report('[analysis_step.try_to_fix]: trying new dt,emass={},{}'.format(dt,emass))
+                    self.report('[analysis_step.try_to_fix]: pk={} trying new dt,emass={},{}'.format(sub.pk,dt,emass))
             return have_something_to_do
 
         if len(candidates) == 0 :
@@ -1517,10 +1538,12 @@ currently only the first element of the list is used.
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
                                 resources=params,
-                                dt=new_dt, mu=new_emass                      
-                             )                                       
-                self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
-                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
+                                dt=new_dt, mu=new_emass,
+                                print= lambda x : self.report('[analysis_step] [builder] {}'.format(x))
+                             )                            
+                sub=self.submit(newcalc)           
+                self.to_context(dt_benchmark=append_(sub))  
+                self.report('[analysis_step] pk={} new emass,dt={},{}'.format(sub.pk,new_emass,new_dt))
                 return #do it!
             elif increase_emass and decrease_emass: # case 3)
                 #check if there are failed simulations with emass in between the biggest too small and the lowest too big
@@ -1540,10 +1563,12 @@ currently only the first element of the list is used.
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
                                 resources=params,
-                                dt=new_dt, mu=new_emass                      
-                             )                                       
-                self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
-                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
+                                dt=new_dt, mu=new_emass,
+                                print= lambda x : self.report('[analysis_step] [builder] {}'.format(x))
+                             )                               
+                sub=self.submit(newcalc)        
+                self.to_context(dt_benchmark=append_(sub))  
+                self.report('[analysis_step] pk={} new emass,dt={},{}'.format(sub.pk,new_emass,new_dt))
                 return #do it!
             elif increase_emass: #case 2) emass is too low, I can increase it!
                 #check that simulations with higher emass are not failed
@@ -1562,10 +1587,12 @@ currently only the first element of the list is used.
                                 self.get_cp_code(),                  
                                 startfrom[0],                        
                                 resources=params,
-                                dt=new_dt, mu=new_emass                      
-                             )                                       
-                self.to_context(dt_benchmark=append_(self.submit(newcalc)))  
-                self.report('[analysis_step] new emass,dt={},{}'.format(new_emass,new_dt))
+                                dt=new_dt, mu=new_emass,
+                                print= lambda x : self.report('[analysis_step] [builder] {}'.format(x))
+                             )       
+                sub=self.submit(newcalc)                                
+                self.to_context(dt_benchmark=append_(sub))  
+                self.report('[analysis_step] pk={} new emass,dt={},{}'.format(sub.pk,new_emass,new_dt))
                 return #do it!
             elif have_garbage:
                 #try to decrease the emass (or the timestep)?
@@ -1721,8 +1748,10 @@ currently only the first element of the list is used.
                 stepwalltime_s= self.ctx.stepwalltime_nose_s if 'stepwalltime_nose_s' in self.ctx else ( self.ctx.stepwalltime_s*3 if 'stepwalltime_s' in self.ctx else None  ),
                    print= lambda x : self.report('[nose] [builder] {}'.format(x))
              )                                       
-        self.to_context(last_nve=append_(self.submit(newcalc)))       
-        self.report('[nose] sent to context dt,emass,tempw,fnosep,press={},{},{},{},{}'.format(dt,emass,float(self.ctx.tempw_current),self.ctx.fnosep,float(self.inputs.pressure)))
+        sub=self.submit(newcalc)
+        self.to_context(last_nve=append_(sub))       
+        self.report('[nose] sent to context pk,dt,emass,tempw,fnosep,press={},{},{},{},{},{}'.format(
+                  sub.pk, dt, emass, float(self.ctx.tempw_current), self.ctx.fnosep, float(self.inputs.pressure)))
         return        
    
     def check_nose(self):
@@ -1795,7 +1824,8 @@ currently only the first element of the list is used.
                    remove_parameters_namelist=['CELL'],
                    additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
                    cmdline=['-ntg', '1', '-nb', '1']            )
-        self.to_context(last_nve=append_(self.submit(final_cg)))
+        sub=self.submit(final_cg)
+        self.to_context(last_nve=append_(sub))
         if self.ctx.cg_scratch or cg_reset_emass_dt:
             #reset time per timestep
             if 'stepwalltime_s' in self.ctx:
@@ -1803,7 +1833,7 @@ currently only the first element of the list is used.
             if 'stepwalltime_nose_s' in self.ctx:
                 del(self.ctx.stepwalltime_nose_s) 
         self.ctx.cg_scratch=False
-        self.report('[final_cg] cg to context (1 step).')
+        self.report('[final_cg] pk={} cg to context (1 step).'.format(sub.pk))
         return
  
     def check_final_cg(self):
@@ -1874,8 +1904,9 @@ currently only the first element of the list is used.
                    print= lambda x : self.report('[run_nve] [builder] {}'.format(x)),
                    structure=s
             )
-        self.to_context(last_nve=append_(self.submit(nve))) 
-        self.report('[run_nve] nve to context')
+        sub=self.submit(nve)
+        self.to_context(last_nve=append_(sub)) 
+        self.report('[run_nve] pk={} nve to context'.format(sub.pk))
         return
 
     def benchmark_parallelization_options(self):
@@ -1900,10 +1931,12 @@ currently only the first element of the list is used.
                        copy_mu_mucut=True,
                        cmdline=['-ntg', str(ntg), '-nb', str(nb)],
                        structure = s,
-                       nstep=self.inputs.nstep_parallel_test.value
+                       nstep=self.inputs.nstep_parallel_test.value,
+                       print= lambda x : self.report('[benchmark_parallelization_options] [builder] {}'.format(x))
                 )
-            self.to_context(parallel_benchmark=append_(self.submit(nve))) 
-            self.report('[benchmark_parallelization_options] nve to context: -nb {} -ntg {}'.format(nb,ntg))
+            sub=self.submit(nve)
+            self.to_context(parallel_benchmark=append_(sub)) 
+            self.report('[benchmark_parallelization_options] pk={} nve to context: -nb {} -ntg {}'.format(sub.pk,nb,ntg))
         return
 
     def benchmark_analysis(self):
