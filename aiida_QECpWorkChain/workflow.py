@@ -561,7 +561,7 @@ def ekinc_const_motion_analysis(traj):
 
 @calcfunction
 def extract_structure_from_trajectory(traj, step_index=lambda: Int(-1)):
-    if abs(int(step_index)) < traj.numsteps:
+    if int(step_index) < traj.numsteps and int(step_index) >= -traj.numsteps:
         return traj.get_step_structure(int(step_index))
     else:
         raise ValueError('index {} out of range for trajectory {}'.format(step_index, traj))
@@ -1351,7 +1351,6 @@ currently only the first element of the list is used.
            else:
                if abs(ek[0]) > float(self.inputs.max_slope_ekinc):
                    #try to decrease ekinc slope by decreasing emass
-                   self.ctx.max_slope_ok=False
                    fac=2.0/3.0
                    new_emass=self.ctx.max_slope_emass*fac
                    if new_emass<float(self.inputs.max_slope_min_emass):
@@ -1359,7 +1358,9 @@ currently only the first element of the list is used.
                        if self.ctx.max_slope_emass > float(self.inputs.max_slope_min_emass):
                            fac=float(self.inputs.max_slope_min_emass)/self.ctx.max_slope_emass
                            self.report('[max_slope] setting minimum allowed electronic mass')
-                       
+                       else:
+                           return
+                   self.ctx.max_slope_ok=False    
                    self.ctx.max_slope_emass=self.ctx.max_slope_emass*fac
                    self.ctx.max_slope_dt=self.ctx.max_slope_dt*(fac)**0.5
                    self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
