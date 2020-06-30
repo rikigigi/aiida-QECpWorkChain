@@ -351,7 +351,7 @@ def configure_cp_builder_restart(code,
    
     parameters['CONTROL']['nstep'] = nstep
     parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
-        
+    print(parameters)    
     builder.parameters = Dict(dict=parameters)
     builder.settings = Dict(dict=settings)
     builder.metadata.options.resources = resources_
@@ -1349,7 +1349,7 @@ currently only the first element of the list is used.
            if tps<float(self.inputs.max_slope_min_ps):
                self.report('[check_slope] the simulation is not long enough: not considering the result of the linear fit')
            else:
-               if abs(ek[0]) > float(self.inputs.max_slope_ekinc):
+               if ek[0] > float(self.inputs.max_slope_ekinc):
                    #try to decrease ekinc slope by decreasing emass
                    fac=2.0/3.0
                    new_emass=self.ctx.max_slope_emass*fac
@@ -1364,6 +1364,7 @@ currently only the first element of the list is used.
                    self.ctx.max_slope_emass=self.ctx.max_slope_emass*fac
                    self.ctx.max_slope_dt=self.ctx.max_slope_dt*(fac)**0.5
                    self.report('[check_slope] ekinc too steepy: correcting emass and dt to {} {}'.format(self.ctx.max_slope_emass,self.ctx.max_slope_dt))
+                   self.ctx.dt_emass_off=(self.ctx.max_slope_dt,self.ctx.max_slope_emass,0)
                    return
                if abs(cm[0]) > float (self.inputs.max_slope_const):
                    self.ctx.max_slope_ok=False 
@@ -1409,8 +1410,12 @@ currently only the first element of the list is used.
             return 409
         dt_=list(res_2.keys())[0] 
         params=res_2[dt_]
-        self.ctx.dt=dt_
-        self.ctx.emass=emass_
+        dt_node=Float(dt_)
+        dt_node.store()
+        emass_node=Float(emass_)
+        emass_node.store()
+        self.ctx.dt=dt_node
+        self.ctx.emass=emass_node
         #generate dictionary for ionic mass correction
         new_mass={}
         for p in params.keys():
@@ -1815,8 +1820,8 @@ currently only the first element of the list is used.
                    self.ctx.last_nve[-1],
                    resources=self.get_cp_resources_cg(),
                    copy_mu_mucut=False if cg_reset_emass_dt else True ,
-                   dt= self.ctx.max_slope_dt if cg_reset_emass_dt else None,
-                   mu=self.ctx.max_slope_emass if cg_reset_emass_dt else None,
+                   dt= self.ctx.dt_emass_off[0] if cg_reset_emass_dt else None,
+                   mu=self.ctx.dt_emass_off[1] if cg_reset_emass_dt else None,
                    mucut=self.ctx.max_slope_emass_cut if cg_reset_emass_dt else None,
                    cg=True,
                    tstress=False,
