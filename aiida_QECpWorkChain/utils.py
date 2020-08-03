@@ -201,7 +201,7 @@ def move_traj_on_scratch(t,new_path='/scratch/rbertoss/', truncate_first=4,dry_r
         print('{}: {}kB'.format(trunc_p,size//1024))
     print('traj size={}MB'.format(tsize//(1024*1024)))
     return tsize
-from aiida_QECpWorkChain.workflow import * 
+
 
 def move_all_outputs(wf,dry_run=True):
     ''' Moves all trajectories but the output ones in a different folder.

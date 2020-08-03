@@ -780,10 +780,6 @@ class CpWorkChain(WorkChain):
                    help='pseudopotential family to use, as in usual aiida operations')
         spec.input('ecutwfc', required=True, valid_type=(Float),validator=validate_ecutwfc,
                    help='wavefunction cutoff (Ry), like in the QE input')
-        spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw,
-                   help='Target temperature (K). It is used if thermostat is used and in initial random velocity initialization, if used and if tempw_initial_random is not provided')
-        spec.input('pressure', required=False, valid_type=(Float),
-                   help='Target pressure (KBar or 0.1GPa). Useful only if thermostat is used.')
         spec.input('pw_code', required=True, valid_type=(aiida.orm.nodes.data.code.Code),validator=validate_pw_list,
                   help='input pw code (used to calculate force ratio)')
         spec.input('cp_code',required=True, valid_type=(aiida.orm.nodes.data.code.Code), validator=validate_cp_list)
@@ -814,12 +810,17 @@ currently only the first element of the list is used.
         spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
         spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0),
                   help='The equilibrated NVE simulation will last at least this number of picoseconds')
-        spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0),
-                  help='Each of the (many) thermobarostating run will last at least this number of picoseconds')
-        spec.input('nose_eq_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
-        spec.input('tempw_initial_random',valid_type=(Float), required=False, help='If provided, sets the initial temperature when randomply initializing the starting velocities.')
-        spec.input('tempw_initial_nose',valid_type=(Float), required=False, help='Thermostat temperature of the first nose cycle. Then the temperature will be set linearly in between this temperature and tempw, for every nose cycle.')
-        spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2),help='Number of nose cycles')
+        #spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0),
+        #          help='Each of the (many) thermobarostating run will last at least this number of picoseconds')
+        #spec.input('nose_eq_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
+        spec.input('tempw_initial_random',valid_type=(Float), required=False, help='If provided, sets the initial temperature when randomly initializing the starting velocities.')
+        #spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw,
+        #           help='Target temperature (K). It is used if thermostat is used and in initial random velocity initialization, if used and if tempw_initial_random is not provided')
+        #spec.input('pressure', required=False, valid_type=(Float),
+        #           help='Target pressure (KBar or 0.1GPa). Useful only if thermostat is used.')
+        #spec.input('tempw_initial_nose',valid_type=(Float), required=False, help='Thermostat temperature of the first nose cycle. Then the temperature will be set linearly in between this temperature and tempw, for every nose cycle.')
+        #spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2),help='Number of nose cycles')
+        spec.input('thermobarostat_points',valid_type=(List),help='List of dicts, each with the format [ { "temperature_K": 1000, "pressure_KBar": 10 , "equilibration_time_ps": 5.0, "thermostat_time_ps": 5.0} ]. The simulation will loop over this list of dictionaries, in the same order, equilibrating for the specified time at the given P,T point.')
         spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
         spec.input('initial_atomic_velocities_A_ps',valid_type=(ArrayData),required=False)
         spec.input('dt',valid_type=(Float),required=False,help='timestep in atomic units')
@@ -988,12 +989,13 @@ currently only the first element of the list is used.
     def small_equilibration_cg(self):
         #This is always the first step
         #build cg input
+        tempw_initial = self.inputs.thermobarostat_points[0]['temperature_K']
         builder = configure_cp_builder_cg(
                                 self.get_cp_code(),
                                 self.inputs.pseudo_family,
                                 self.ctx.start_structure,
                                 self.inputs.ecutwfc,
-                                self.inputs.tempw_initial_random if 'tempw_initial_random' in self.inputs else self.inputs.tempw,
+                                self.inputs.tempw_initial_random if 'tempw_initial_random' in self.inputs else tempw_initial,
                                 self.get_cp_resources_cg (),
                                 additional_parameters=self.inputs.additional_parameters_cp.get_dict(),
                                 ion_velocities = self.ctx.start_velocities_A_au if 'start_velocities_A_au' in self.ctx else None,
@@ -1459,24 +1461,27 @@ currently only the first element of the list is used.
         else:
             self.ctx.last_nve=[self.ctx.check1] 
         #setup intermediate temperatures
-        if 'tempw_initial_nose' in self.inputs:
-            self.ctx.Tstart=self.inputs.tempw_initial_nose.value
-        elif 'tempw_initial_random' in self.inputs:
-            self.ctx.Tstart=self.inputs.tempw_initial_random.value
-        else:
-            self.ctx.Tstart=self.inputs.tempw.value
+        #if 'tempw_initial_nose' in self.inputs:
+        #    self.ctx.Tstart=self.inputs.tempw_initial_nose.value
+        #elif 'tempw_initial_random' in self.inputs:
+        #    self.ctx.Tstart=self.inputs.tempw_initial_random.value
+        #else:
+        #    self.ctx.Tstart=self.inputs.tempw.value
         self.ctx.idx_thermo_cycle=0
 
     def nose_prepare(self):
         #next final_cg will start from scratch, setting the correct number of plane waves
         self.ctx.cg_scratch=True
         self.ctx.nose_start=len(self.ctx.last_nve)
-        self.ctx.run_nve_ps=self.inputs.nose_eq_required_picoseconds.value
-        if self.inputs.nthermo_cycle.value > 1:
-            self.ctx.tempw_current=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
-                                          float(self.inputs.nthermo_cycle.value-1)
-        else:
-            self.ctx.tempw_current=self.inputs.tempw.value
+        self.ctx.run_nose_ps = self.inputs.thermobarostat_points[     int(self.ctx.idx_thermo_cycle)]['thermostat_time_ps']
+        self.ctx.tempw_current = self.inputs.thermobarostat_points[   int(self.ctx.idx_thermo_cycle)]['temperature_K']
+        self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]
+        self.ctx.run_nve_ps = self.inputs.thermobarostat_points[      int(self.ctx.idx_thermo_cycle)]['equilibration_time_ps']
+        #if self.inputs.nthermo_cycle.value > 1:
+        #    self.ctx.tempw_current=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
+        #                                  float(self.inputs.nthermo_cycle.value-1)
+        #else:
+        #    self.ctx.tempw_current=self.inputs.tempw.value
 
     def fix_last_nve(self,report):
         if not self.ctx.last_nve[-1].is_finished_ok:
@@ -1519,7 +1524,7 @@ currently only the first element of the list is used.
             },
             'CELL': {
                 'cell_dynamics': 'pr',
-                'press': float(self.inputs.pressure),
+                'press': float(self.ctx.pressure_current),
                 'cell_dofree': 'volume' if ibrav == 1 else 'xyz',
             },
         }
@@ -1531,14 +1536,14 @@ currently only the first element of the list is used.
                 dt=dt, mu=emass,
                 additional_parameters=nose_pr_param,
                 cmdline=self.ctx.cmdline_cp,
-                ttot_ps=abs(self.inputs.nose_required_picoseconds.value-nose_ps_done),
+                ttot_ps=abs(self.ctx.run_nose_ps-nose_ps_done),
                 stepwalltime_s= self.ctx.stepwalltime_nose_s if 'stepwalltime_nose_s' in self.ctx else ( self.ctx.stepwalltime_s*3 if 'stepwalltime_s' in self.ctx else None  ),
                    print= lambda x : self.report('[nose] [builder] {}'.format(x))
              )                                       
         sub=self.submit(newcalc)
         self.to_context(last_nve=append_(sub))       
         self.report('[nose] sent to context pk,dt,emass,tempw,fnosep,press={},{},{},{},{},{}'.format(
-                  sub.pk, dt, emass, float(self.ctx.tempw_current), self.ctx.fnosep, float(self.inputs.pressure)))
+                  sub.pk, dt, emass, float(self.ctx.tempw_current), self.ctx.fnosep, float(self.ctx.pressure_current)))
         return        
    
     def check_nose(self):
@@ -1551,7 +1556,7 @@ currently only the first element of the list is used.
             self.ctx.stepwalltime_nose_s=r
             self.report('[check_nose] nose wall time: {}s per step'.format(r))
  
-        if elapsed_simulation_time < self.inputs.nose_required_picoseconds.value:
+        if elapsed_simulation_time < float(self.ctx.run_nose_ps):
             self.report('[check_nose] finished nose steps: {}'.format(nose_number))
             return True 
         else:
@@ -1570,7 +1575,7 @@ currently only the first element of the list is used.
             r=time/float(nsteps)
             self.ctx.stepwalltime_s=r
             self.report('[check_nve_nose] nve wall time: {}s per step'.format(r))
-        if elapsed_simulation_time < self.inputs.nose_eq_required_picoseconds.value:
+        if elapsed_simulation_time < float(self.ctx.run_nve_ps):
             self.report('[check_nve_nose] finished nve steps: {}'.format(nose_number))
             return True 
         else:
@@ -1644,14 +1649,14 @@ currently only the first element of the list is used.
         pstd=p.std()
         self.report('[equil_not_ok] T={} std(T)={}'.format(tm,tstd))
         self.report('[equil_not_ok] p={} std(p)={}'.format(pm,pstd))
-        if abs(tm-float(self.ctx.tempw_current))<tstd and abs(pm-float(self.inputs.pressure)/10.0)<pstd:
+        if abs(tm-float(self.ctx.tempw_current))<tstd and abs(pm-float(self.ctx.pressure_current)/10.0)<pstd:
             #we completed this step
             self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
-            self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,self.inputs.nthermo_cycle.value))
+            self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,len(self.inputs.thermobarostat_points)))
         else:
-            self.report('[equil_not_ok] repeating thermo cycle {}/{}'.format(self.ctx.idx_thermo_cycle,self.inputs.nthermo_cycle.value))
+            self.report('[equil_not_ok] repeating thermo cycle {}/{}'.format(self.ctx.idx_thermo_cycle,len(self.inputs.thermobarostat_points)))
        
-        if self.ctx.idx_thermo_cycle >= self.inputs.nthermo_cycle.value:
+        if self.ctx.idx_thermo_cycle >= len(self.inputs.thermobarostat_points):
             self.report('[equil_not_ok] equilibrated')
             return False
         else:
@@ -1662,7 +1667,6 @@ currently only the first element of the list is used.
             self.ctx.last_nve=[self.ctx.check1]
         self.ctx.check2=self.ctx.last_nve[-1]
         self.ctx.run_nve_ps=self.inputs.nve_required_picoseconds.value
-
         
 
     def run_nve(self):
