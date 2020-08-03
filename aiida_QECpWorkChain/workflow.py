@@ -9,79 +9,8 @@ from aiida.plugins.factories import DataFactory
 import numpy as np
 import qe_tools.constants as qeunits
 
-####
-# utilities for manipulating nested dictionary
 
-def dict_keys(d,level=0):
-    #print (d,level)
-    if level==0:
-        return list(d.keys())
-    elif level>0: return dict_keys(d[list(d.keys())[0]],level-1)
-    else: raise ValueError('level cannot be negative ({})'.format(level))
-
-def get_element(d,keylist):
-    #print(keylist)
-    if keylist:
-        return get_element(d[keylist.pop()],keylist)
-    else:
-        return d
-    
-def inverse_permutation(p):
-    inv=[None] * len(p)
-    for i in range(len(p)):
-        inv[p[i]]=i
-    return inv
-
-def apply_perm(a,p,reverse=False):
-    if reverse:
-        return list(reversed([ a[i] for i in p ]))
-    else:
-        return [ a[i] for i in p ]
-        
-def permutation_nested_dict(d,level=0, maxlevels=0,keylist=[],permutation=[]):
-    if permutation == []:
-        permutation=list(range(maxlevels+1))
-    #print (level,maxlevels,keylist,permutation)
-    if level==maxlevels:
-        return { what:  get_element(
-                                d,
-                                apply_perm(
-                                    keylist+[what],
-                                    inverse_permutation(list(reversed(permutation))),
-                                    reverse=True
-                                )
-                        )  for what in dict_keys(d,permutation[0]) 
-               }
-    else:
-        return { 
-            what: permutation_nested_dict(
-                            d,
-                            level+1,
-                            maxlevels,
-                            keylist=keylist+[what],
-                            permutation=permutation
-                  ) 
-            for what in dict_keys(d,permutation[maxlevels-level])
-        }
-    
-def test_permutation_nested_dict(orig,permuted,permutation,keylist=[]):
-    #print('keylist=',keylist)
-    element=get_element(orig,keylist.copy())
-    if isinstance(element,dict):
-        for key in element.keys():
-            #print ('new keylist',keylist+[key])
-            test_permutation_nested_dict(orig,permuted,permutation,keylist=[key]+keylist)
-    else:
-        print ('testing',keylist,'==', apply_perm(list(reversed(keylist)),permutation))
-        print(element,'==',get_element(permuted,apply_perm(list(reversed(keylist)),permutation)))
-        assert( element == get_element(permuted,apply_perm(list(reversed(keylist)),permutation)))
-
-
-
-
-####
-
-
+from .utils import *
 
 def validate_structure(structure_or_trajectory):
     return
@@ -104,19 +33,6 @@ def validate_tempw(tempw):
     if tempw <= 0.0:
         return 'tempw must be a positive number'
     return
-
-
-
-def get_node(node):
-    if isinstance(node, aiida.orm.nodes.Node):
-        return node
-    else:
-        return aiida.orm.load_node(node)
-
-def get_pseudo_from_inputs(submitted):
-    return {x[9:] : getattr(submitted.inputs,x)  for x in dir(submitted.inputs) if x[:9]=='pseudos__'  }
-
-
 
 def configure_cp_builder_cg(code,
                             pseudo_family,
@@ -360,78 +276,6 @@ def configure_cp_builder_restart(code,
     return builder
 
 
-
-#stuff to analyze the trajectory and traverse the aiida graph
-
-def get_children_nodetype(node,nodetype):
-    '''
-        Find in a recursive way all nodetype nodes that are in the output tree of node.
-        The recursion is stopped when the node has no inputs or it is a nodetype node,
-        otherwise it will go to every parent node.
-    '''
-    if isinstance(node, list):
-        res=[]
-        for n in node:
-            res=res+get_children_nodetype(n,nodetype)
-        return res
-    if not isinstance(node, nodetype):
-        incoming=node.get_outgoing().all_nodes()
-        res=[]
-        for i in incoming:
-            res = res + get_children_nodetype(i,nodetype)
-        return res
-    else:
-        return [node]
-    
-def get_children_calculation(node):
-    return get_children_nodetype(node,aiida.orm.nodes.process.calculation.calcjob.CalcJobNode)
-
-def get_children_calcfunction(node):
-    return get_children_nodetype(node,aiida.orm.nodes.process.calculation.calcfunction.CalcFunctionNode)
-
-def get_children_trajectory(node):
-    return get_children_nodetype(node,aiida.orm.nodes.data.TrajectoryData)
-
-
-def get_parent_nodetype(node, nodetype, minpk=0):
-    '''
-        Find in a recursive way all nodetype nodes that are in the input tree of node.
-        The recursion is stopped when the node has no inputs or it is a nodetype node,
-        otherwise it will go to every parent node. Recursion is stopped if pk is less than minpk
-    '''
-    if isinstance(node, list):
-        res=[]
-        for n in node:
-            res=res+get_parent_nodetype(n,nodetype,minpk)
-        return res
-    if not isinstance(node, nodetype):
-        incoming=node.get_incoming().all_nodes()
-        res=[]
-        for i in incoming:
-            if i.pk < minpk:
-                continue
-            res = res + get_parent_nodetype(i,nodetype,minpk)
-        return res
-    else:
-        return [node]
-    
-def get_parent_calculation(node, minpk=0):
-    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcjob.CalcJobNode,minpk)
-
-def get_parent_calcfunction(node, minpk=0):
-    return get_parent_nodetype(node,aiida.orm.nodes.process.calculation.calcfunction.CalcFunctionNode,minpk)
-
-def get_parent_trajectory(node, minpk=0):
-    return get_parent_nodetype(node,aiida.orm.nodes.data.TrajectoryData,minpk)
-
-def get_atomic_types_and_masks(type_array):
-    names=set(type_array)
-    masks=[]
-    outnames=[]
-    for name in set(names):
-        masks.append(np.array(type_array)==name)
-        outnames.append(name)
-    return zip(outnames,masks)
 
 
 #compare forces between reference pw calculation and cp one
@@ -923,69 +767,6 @@ def fake_function(*args,**kwargs):
 
 
 
-#TODO
-class CpParamConvergence(WorkChain):
-    @classmethod
-    def define(cls,spec):
-        super().define(spec)
-        spec.input('structure',required=True, valid_type=(aiida.orm.nodes.data.StructureData))
-        spec.input('pseudo_family',required=True, valid_type=(Str))
-        spec.input('cp_code',required=True, valid_type=(aiida.orm.nodes.data.code.Code))
-        spec.input('resources',required=True, valid_type=(Dict))
-        spec.input('additional_parameters',valid_type=(Dict))
-        spec.input('start_parameters',valid_type=(Dict))
-        spec.input('end_parameters',valid_type=(Dict))
-        spec.input('step_parameters',valid_type=(Dict))
-        spec.input('ntest_stability',valid_type=(Int), default= lambda : Int(10))
-        spec.output('parameters')
-
-        spec.outline(
-            cls.setup,
-            cls.stability_test,
-            cls.ekin_conv_thr,
-            cls.ecut,
-            cls.ecut_rho, # this will call small_boxes if necessary
-            cls.results
-        )
-
-    def setup(self):
-        self.ctx.param=self.inputs.end_parameters.get_dict()
-        if 'nr1b' in self.ctx.param['SYSTEM']:
-            self.ctx.nrb=True
-        else:
-            self.ctx.nrb=False
-    
-    def run_calc(self):
-        calc=configure_cp_builder_cg(
-            self.inputs.cp_code,
-            self.inputs.pseudo_family,
-            self.inputs.structure,
-            42.0,
-            self.inputs.resources,
-            self.inputs.additional_parameters,
-            dt=6.0
-         )
-        return calc
-    
-    def stability_test(self):
-        for i in range(self.inputs.ntest_stability.value):
-            calc=self.run_calc()
-            self.to_context(tests=append_(calc))
-
-    def ecut(self):
-        pass
-
-    def ecut_rho(self):
-        pass
-
-    def small_boxes(self):
-        pass
-
-    def ekin_conv_thr(self):
-        pass
-    
-    def results(self):
-        pass
 
 class CpWorkChain(WorkChain):
     @classmethod
