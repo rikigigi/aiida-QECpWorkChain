@@ -1475,7 +1475,7 @@ currently only the first element of the list is used.
         self.ctx.nose_start=len(self.ctx.last_nve)
         self.ctx.run_nose_ps = self.inputs.thermobarostat_points[     int(self.ctx.idx_thermo_cycle)]['thermostat_time_ps']
         self.ctx.tempw_current = self.inputs.thermobarostat_points[   int(self.ctx.idx_thermo_cycle)]['temperature_K']
-        self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]
+        self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]['pressure_KBar']
         self.ctx.run_nve_ps = self.inputs.thermobarostat_points[      int(self.ctx.idx_thermo_cycle)]['equilibration_time_ps']
         #if self.inputs.nthermo_cycle.value > 1:
         #    self.ctx.tempw_current=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
@@ -1551,10 +1551,13 @@ currently only the first element of the list is used.
         elapsed_simulation_time=get_total_time(self.ctx.last_nve[self.ctx.nose_start:])
         #if necessary, get timestep walltime
         if nose_number>0 and not 'stepwalltime_nose_s' in self.ctx: 
-            time,nsteps=main_loop_line(self.ctx.last_nve[-1])
-            r=time/float(nsteps)
-            self.ctx.stepwalltime_nose_s=r
-            self.report('[check_nose] nose wall time: {}s per step'.format(r))
+            try:
+                time,nsteps=main_loop_line(self.ctx.last_nve[-1])
+                r=time/float(nsteps)
+                self.ctx.stepwalltime_nose_s=r
+                self.report('[check_nose] nose wall time: {}s per step'.format(r))
+            except IndexError:
+                self.report('[check_nose] cannot read nose wall time')
  
         if elapsed_simulation_time < float(self.ctx.run_nose_ps):
             self.report('[check_nose] finished nose steps: {}'.format(nose_number))
@@ -1571,10 +1574,13 @@ currently only the first element of the list is used.
         nose_number=len(self.ctx.last_nve)-self.ctx.first_prod_nve_idx
         #if necessary, get timestep walltime
         if nose_number>0 and not 'stepwalltime_s' in self.ctx: 
-            time,nsteps=main_loop_line(self.ctx.last_nve[-1])
-            r=time/float(nsteps)
-            self.ctx.stepwalltime_s=r
-            self.report('[check_nve_nose] nve wall time: {}s per step'.format(r))
+            try:
+                time,nsteps=main_loop_line(self.ctx.last_nve[-1])
+                r=time/float(nsteps)
+                self.ctx.stepwalltime_s=r
+                self.report('[check_nve_nose] nve wall time: {}s per step'.format(r))
+            except IndexError:
+                self.report('[check_nve_nose] cannot read nve wall time')
         if elapsed_simulation_time < float(self.ctx.run_nve_ps):
             self.report('[check_nve_nose] finished nve steps: {}'.format(nose_number))
             return True 
