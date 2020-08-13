@@ -185,7 +185,7 @@ def configure_cp_builder_restart(code,
         if account is not None:
             builder.metadata.options.account = account
     if not from_scratch:
-        #note that the structure will not be used (he has the restart)
+        #note that the structure will not be used (it has the restart)
         if structure is None:
             builder.structure = start_from.inputs.structure
         else:
@@ -591,15 +591,11 @@ def load_nodes(pks):
 def get_total_time(cps):
     if len(cps)==0:
         return 0.0
-    tstart=[]
-    tstop=[]
+    tot=0.0
     for cp in cps:
         if 'output_trajectory' in cp.outputs:
-            tstart.append(cp.outputs.output_trajectory.get_array('times')[0])
-            tstop.append (cp.outputs.output_trajectory.get_array('times')[-1])
-    if len(tstart)==0:
-        return 0.0
-    return max(tstop)-min(tstart)
+            tot = tot + cp.outputs.output_trajectory.get_array('times')[-1] - cp.outputs.output_trajectory.get_array('times')[0]
+    return tot
     
 
 
@@ -1617,14 +1613,14 @@ currently only the first element of the list is used.
                    mucut=self.ctx.max_slope_emass_cut if cg_reset_emass_dt else None,
                    cg=True,
                    tstress=False,
-                   from_scratch=True if (self.ctx.cg_scratch or cg_reset_emass_dt) else False,
+                   from_scratch=True, #if (self.ctx.cg_scratch or cg_reset_emass_dt) else False,
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
                    additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
                    cmdline=['-ntg', '1', '-nb', '1']            )
         sub=self.submit(final_cg)
         self.to_context(last_nve=append_(sub))
-        if self.ctx.cg_scratch or cg_reset_emass_dt:
+        if True: #self.ctx.cg_scratch or cg_reset_emass_dt:
             #reset time per timestep
             if 'stepwalltime_s' in self.ctx:
                 del(self.ctx.stepwalltime_s)
