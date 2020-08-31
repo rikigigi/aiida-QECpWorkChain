@@ -169,7 +169,7 @@ def get_atomic_types_and_masks(type_array):
 import shutil
 from pathlib import Path
 
-def move_traj_on_scratch(t,new_path='/scratch/rbertoss/', truncate_first=4,dry_run=True):
+def move_traj_on_scratch(t,new_path='/scratch/rbertoss/', truncate_first=4,dry_run=True,print=print):
     '''
     Given a trajectory t as input, it moves the files in the repository in a new folder new_path.
     Removes first truncate_first elements from the original path, then appends this string to new_path:
@@ -203,7 +203,7 @@ def move_traj_on_scratch(t,new_path='/scratch/rbertoss/', truncate_first=4,dry_r
     return tsize
 
 
-def move_all_outputs(wf,dry_run=True):
+def move_all_outputs(wf,dry_run=True, print=print):
     ''' Moves all trajectories but the output ones in a different folder.
     It uses the default folder settings of move_traj_on_scratch.
     It returns the total size of the files
@@ -220,7 +220,7 @@ def move_all_outputs(wf,dry_run=True):
         if t.pk < wf.pk:
             print('trajectory {} is too old. Not moving'.format(t.pk))
             continue
-        tsize=tsize+move_traj_on_scratch(t,dry_run=dry_run)
+        tsize=tsize+move_traj_on_scratch(t,dry_run=dry_run,print=print)
     print('total_size={}MB'.format(tsize//(1024*1024)))
     print('not moved: {}'.format(not_moved))
     return tsize

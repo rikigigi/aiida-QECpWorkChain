@@ -618,78 +618,27 @@ def set_kinds(new_kinds,structure):
     return new_structure
 
 
-#traj=cp.outputs.output_trajectory
-def merge_trajectories(t,unique=True):
-    '''
-    Merge trajectories taking only one timestep for each timestep id.
-    In case of multiple timesteps with the same id if unique is True,
-    take the one of the last trajectory in the list.
-    '''
-    arraynames=t[0].get_arraynames()
-    arrays={}
-    steps={}
-    symbols=t[0].symbols
-    for a in arraynames:
-        arrays[a]=[]
-    for traj in t:
-        #traj=c.outputs.output_trajectory
-        if not symbols == traj.symbols:
-            raise RuntimeError('Wrong symbols: trajectories are not compatible')
-        if unique:
-            for idx,step in enumerate(traj.get_array('steps')):
-                steps.setdefault(step,[]).append((traj,idx))
-        else:
-            for a in arraynames:
-                arrays[a].append(traj.get_array(a))
-    if unique:
-        sortedkeys=list(steps.keys())
-        sortedkeys.sort()
-        for stepid in sortedkeys:
-            print(stepid)
-            for arrkey in arraynames:
-                #pick only the last occurence in the trajectory list of each timestep 'stepid'
-                arrays[arrkey].append(steps[stepid][-1][0].get_array(arrkey)[steps[stepid][-1][1]])
-    res=aiida.orm.nodes.data.array.trajectory.TrajectoryData()
-    res.set_attribute('symbols',symbols)
-    for a in arraynames:
-        if unique:
-            res.set_array(a,np.array(arrays[a]))
-        else:
-            res.set_array(a,np.concatenate(arrays[a]))
-    return res
 
 def to_ArrayData(a,key):
     res=ArrayData()
     res.set_array(key,a)
     return res
 
-@calcfunction
-def merge_traj(t1,t2):
-    return merge_trajectories([t1,t2])
 
-@calcfunction
-def concatenate_traj(t1,t2):
-    return merge_trajectories([t1,t2],unique=False)
-
-def merge_many_traj(cplist,unique=True):
-    res=None
-    for cp in cplist:
-        if res is not None:
-            if 'output_trajectory' in cp.outputs:
-                if unique:
-                    res=merge_traj(res,cp.outputs.output_trajectory)
-                else:
-                    res=concatenate_traj(res,cp.outputs.output_trajectory)
-        else:
-            if 'output_trajectory' in cp.outputs:
-                res=cp.outputs.output_trajectory
-    return res
-
-#TODO
-def volatility(ek,t):
-    return sum(abs(ek[1:]-ek[:-1])/(t[1:]-t[:-1]))
-
-
+from .generate_concatenate import *
+#def merge_many_traj(cplist,unique=True):
+#    res=None
+#    for cp in cplist:
+#        if res is not None:
+#            if 'output_trajectory' in cp.outputs:
+#                if unique:
+#                    res=merge_traj(res,cp.outputs.output_trajectory)
+#                else:
+#                    res=concatenate_traj(res,cp.outputs.output_trajectory)
+#        else:
+#            if 'output_trajectory' in cp.outputs:
+#                res=cp.outputs.output_trajectory
+#    return res
 
 def factors(nr):
     i = 2
@@ -1776,7 +1725,7 @@ currently only the first element of the list is used.
         res1=merge_many_traj(self.ctx.last_nve[:self.ctx.first_prod_nve_idx],unique=False)
         #cmdline
         if res1 is not None:
-            res1=concatenate_traj(res1,res)
+            res1=concatenate_traj2(res1,res)
             self.out('full_traj',res1)
         cmdline=List(list=self.ctx.last_nve[-1].inputs.settings['cmdline'])
         cmdline.store()
