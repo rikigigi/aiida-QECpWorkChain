@@ -7,7 +7,8 @@ from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
-import qe_tools.constants as qeunits
+import qe_tools
+qeunits=qe_tools.CONSTANTS
 
 
 from .utils import *
@@ -345,36 +346,50 @@ def compare_forces_many(submitted, minpk=0):
     return atom_forces
 
 
-def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax=None,minpk=0):
+def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax_=None,minpk=0, create_fig=None):
     '''
     Given a list of pw calcjobs, analyzes the force ratios between them and their cp ancestors.
     Produces a series of histogram plots and mean and standard deviation of the ratio in an output dictionary.
     '''
+    if isinstance(ax_,list) or ax_ is None:
+        ax=ax_
+    else:
+        ax=[ax_]
     atom_forces=compare_forces_many(pwcalcjobs, minpk)
+    figs=[]
     res={}
+    ax_counter=0
     for emass in atom_forces.keys():
         for dt in atom_forces[emass].keys():
             if ax is not None:
-                ax.set_title('emass={}, dt={}, PK={}'.format(emass,dt,atom_forces[emass][dt]['PK']))
+                if len(ax) <= ax_counter:
+                    fig__,ax__=create_fig()
+                    figs.append(fig__)
+                    ax.append(ax__)
+                ax[ax_counter].set_title('emass={}, dt={}, PK={}'.format(emass,dt,atom_forces[emass][dt]['PK']))
             for element in atom_forces[emass][dt]['fratios'].keys():
                 mask=atom_forces[emass][dt]['forces'][element]>fthreshold
                 res.setdefault(emass,{}).setdefault(dt,{})[element]={
                     'forces_std': atom_forces[emass][dt]['forces'][element][mask].std(),
                     'fratios_mean': atom_forces[emass][dt]['fratios'][element][mask].mean()*corrfactor,
                     'fratios_std': atom_forces[emass][dt]['fratios'][element][mask].std()*corrfactor,
-                    'PK': atom_forces[emass][dt]['PK']
+                    'PK': atom_forces[emass][dt]['PK'],
+                    'fig_idx': ax_counter
                 }
                 if ax is not None:
-                    ax.hist(
+                    hist=ax[ax_counter].hist(
                     atom_forces[emass][dt]['fratios'][element][
                         mask
                     ]*corrfactor,
                     bins=100,alpha=0.5,label='{0:s} mean={1:.4f} std={2:.4f}'.format(element,res[emass][dt][element]['fratios_mean'],res[emass][dt][element]['fratios_std'])
-                )
+                      )
+                    res[emass][dt][element]['hist']=hist
             if ax is not None:
-                ax.legend()
+                ax[ax_counter].legend()
+            if ax_counter < len(ax):
+                ax_counter += 1
     if ax is not None:
-        return res, ax
+        return res, ax,figs, ax_counter
     else:
         return res
 
@@ -748,10 +763,12 @@ currently only the first element of the list is used.
         spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}),
                    help='parameters that will be included in the settings input of the QE CP plugin. These settings will be added on top of the default one. Same format as plugin input')
         spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]))
-        spec.input('emass_start_stop_step_mul', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
+        #spec.input('emass_list', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
+        spec.input('emass_list', valid_type=(List), default=lambda: List(list=[50.0, 75.0, 100.0]))
         spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100),
                    help='Number of pw submitted for every trajectory during calculation of force ratio.')
         spec.input('skip_emass_dt_test',valid_type=(Bool), default=lambda: Bool(False))
+        spec.input('adjust_ionic_mass', valid_type=(Bool), default=lambda: Bool(False), help='Multiply the mass of the ions by the corresponding force ration between the cp forces and pw forces -- that is less than 1')
         spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
         spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0),
                   help='The equilibrated NVE simulation will last at least this number of picoseconds')
@@ -797,7 +814,7 @@ currently only the first element of the list is used.
             ),
             cls.setup_check1, #everything will start from ctx.check1 
             #find best parallelization options
-            cls.benchmark_parallelization_options, # sets, if test was performed, new masses for ions
+            cls.benchmark_parallelization_options, # sets, if test was performed, NEW MASSES for ions
             cls.benchmark_analysis, #overwrite ctx.check1 with the faster simulation
             #thermobarostatation
             #prepare ctx.last_nve
@@ -810,7 +827,7 @@ currently only the first element of the list is used.
                 cls.final_cg,# append to ctx.last_nve
                 cls.check_final_cg,
                 while_(cls.check_nve_nose)(
-                    cls.run_nve, # append to ctx.last_nve #set new masses of ion if self.ctx.find_new_ion_masses is True
+                    cls.run_nve, # append to ctx.last_nve; eventually SET NEW MASSES of ion if self.ctx.find_new_ion_masses is True
                     # check slope of ekinc and econt, correct and eventually do a new final_cg
                     cls.prepare_check_slope,
                     cls.check_slope,
@@ -819,7 +836,7 @@ currently only the first element of the list is used.
                         cls.final_cg,
                         cls.prepare_find_new_masses, # do a small cp
                         cls.compare_forces_pw, #takes trajectory from self.ctx.dt_benchmark!
-                        cls.find_new_ion_masses #set new ions masses according to force ratio # ratio are in self.ctx.ionic_mass_corr
+                        cls.find_new_ion_masses #find new force ratios; ratio are in self.ctx.ionic_mass_corr
                     )
                 )
             ),
@@ -896,7 +913,7 @@ currently only the first element of the list is used.
         if 'structure_kinds' in self.inputs:
             self.report('SETTING KINDS as in {}'.format(self.inputs.structure_kinds))
             self.ctx.start_structure = set_kinds(self.inputs.structure_kinds,self.ctx.start_structure)
-            if not self.inputs.skip_emass_dt_test.value:
+            if not self.inputs.skip_emass_dt_test.value and self.inputs.adjust_ionic_mass:
                 self.report('!! WARNING !! skip_emass_dt_test is False. The masses of atoms will be adjusted, by a rescaling of the current ones.')
         else:
             self.report('using default kinds')
@@ -920,8 +937,7 @@ currently only the first element of the list is used.
             self.out('emass',self.inputs.emass)
         else:
             #check that there are some values in the provided range
-            start,stop,step,fac=self.inputs.emass_start_stop_step_mul
-            if len(np.arange(start,stop,step))<=0:
+            if len(self.inputs.emass_list) <= 0:
                 return 406 
             if len(np.arange(*self.inputs.dt_start_stop_step)) <= 0:
                 return 406
@@ -964,8 +980,8 @@ currently only the first element of the list is used.
         #prepare multiple
         params=copy.deepcopy(self.get_cp_resources_cp())
         params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
-        start,stop,step,fac=self.inputs.emass_start_stop_step_mul
-        for mu in fac*np.arange(start,stop,step)**2:
+        #start,stop,step,fac=self.inputs.emass_list
+        for mu in self.inputs.emass_list:
             calc=configure_cp_builder_restart(
                                                self.get_cp_code(),
                                                self.ctx.initial_cg,
@@ -977,7 +993,6 @@ currently only the first element of the list is used.
             self.to_context(emass_benchmark=append_(sub))
             self.report('[emass_benchmark] pk={} emass={} sent to context'.format(sub.pk,mu))
            
-        #apply first correction of atomic mass
         return
 
     def dt_benchmark(self):
@@ -1149,7 +1164,7 @@ currently only the first element of the list is used.
         for p in params.keys():
             new_mass[p]=params[p]['fratios_mean']
         self.ctx.ionic_mass_corr=new_mass
-        self.report('[analysis_step] mass_corrections={}'.format(new_mass))
+        self.report('[find_new_ion_masses] mass_corrections={}'.format(new_mass))
          
 
     def analysis_step(self):
@@ -1628,11 +1643,14 @@ currently only the first element of the list is used.
             return
         if not 'find_new_ion_masses' in self.ctx:
             self.ctx.find_new_ion_masses=False
+        s=None
         if self.ctx.find_new_ion_masses:
             self.ctx.find_new_ion_masses=False 
-            s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
-        else:
-            s=None
+            if self.inputs.adjust_ionic_mass.value:
+                self.report('[run_nve] adjusting ionic masses according to force ratio')
+                s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
+            else:
+                self.report('[run_nve] keeping previous ionic masses')
 
         nve_ps_done=get_total_time(self.ctx.last_nve[self.ctx.first_prod_nve_idx:])
         nve=configure_cp_builder_restart(
@@ -1656,7 +1674,11 @@ currently only the first element of the list is used.
             return
         s=None
         if not self.inputs.skip_emass_dt_test.value:
-            s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
+            if self.inputs.adjust_ionic_mass.value:
+                self.report('[benchmark_parallelization_options] adjusting ionic masses according to force ratio')
+                s=set_mass(Dict(dict=self.ctx.ionic_mass_corr),self.ctx.check1.inputs.structure)
+            else:
+                self.report('[benchmark_parallelization_options] keeping previous ionic masses' )
         resources=copy.deepcopy(self.get_cp_resources_cp())
         resources['wallclock']=self.inputs.benchmark_parallel_walltime_s.value
         configlist=possible_ntg_nb(resources['resources']['num_machines'],

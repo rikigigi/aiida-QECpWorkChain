@@ -7,7 +7,8 @@ from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if
 from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
-import qe_tools.constants as qeunits
+import qe_tools
+qeunits=qe_tools.CONSTANTS
 ####
 # utilities for manipulating nested dictionary
 

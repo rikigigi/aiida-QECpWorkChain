@@ -1,4 +1,5 @@
-from qe_tools.constants import bohr_to_ang, hartree_to_ev, timeau_to_sec
+import qe_tools
+qeu=qe_tools.CONSTANTS
 
 def w3a(o,arr):
     o.write('{} {} {}\n'.format(arr[0],arr[1],arr[2]))
@@ -14,9 +15,9 @@ def write_cp_trajectory(out_prefix,time,pos,vel,cel,steps=None):
         header='{} {}\n'.format(steps[i] if steps is not None else i, time[i])
         for p in (pos_out, vel_out, cel_out):
             p.write(header)
-        wn3a(pos_out,pos[i]/bohr_to_ang)
-        wn3a(vel_out,vel[i]/(bohr_to_ang / (timeau_to_sec * 10**12)))
-        wn3a(cel_out,cel[i]/bohr_to_ang)
+        wn3a(pos_out,pos[i]/qeu.bohr_to_ang)
+        wn3a(vel_out,vel[i]/(qeu.bohr_to_ang / (qeu.timeau_to_sec * 10**12)))
+        wn3a(cel_out,cel[i]/qeu.bohr_to_ang)
     pos_out.close()
     vel_out.close()
     cel_out.close()
