@@ -386,7 +386,6 @@ def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax_=None,minpk
                     res[emass][dt][element]['hist']=hist
             if ax is not None:
                 ax[ax_counter].legend()
-            if ax_counter < len(ax):
                 ax_counter += 1
     if ax is not None:
         return res, ax,figs, ax_counter
