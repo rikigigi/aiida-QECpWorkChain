@@ -16,7 +16,11 @@ def dict_keys(d,level=0):
     #print (d,level)
     if level==0:
         return list(d.keys())
-    elif level>0: return dict_keys(d[list(d.keys())[0]],level-1)
+    elif level>0:
+        l=[]
+        for k in d.keys():
+            l = l + dict_keys(d[k],level-1)
+        return list(set(l))
     else: raise ValueError('level cannot be negative ({})'.format(level))
 
 def get_element(d,keylist):

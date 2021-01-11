@@ -44,7 +44,8 @@ def configure_cp_builder_cg(code,
                             additional_parameters={},
                             nstep=50,
                             ion_velocities=None,
-                            dt=3.0
+                            dt=3.0,
+                            print=print
                             #queue,#='regular1', #inside resources
                             #wallclock=3600,
                             #account=None
@@ -795,6 +796,9 @@ currently only the first element of the list is used.
         spec.input('max_slope_const',valid_type=(Float), default=lambda: Float(0.05),help='max slope in K/ps of the constant of motion linear fit')
         spec.input('max_slope_min_ps',valid_type=(Float), default=lambda: Float(1.0),help='minimum required lenght in ps of the last trajectory to do the linear fit on ekinc and const of motion')
         spec.input('max_slope_min_emass',valid_type=(Float), default=lambda: Float(50.0),help='minimum possible value of electronic mass that can be set by the max_slope correction routine')
+        spec.input('min_traj_steps_vdos', valid_type=(Int), default=lambda: Int(100), help='minimum number of steps to consider the calculated vibrational spectrum maximum valid, to set the thermostat frequency')
+        spec.input('default_nose_frequency', valid_type=(Float), default=lambda: Float(10.0), help='default nose frequency when a frequency cannot be estimated from the vibrational spectrum')
+        spec.input('minimum_nose_frequency', valid_type=(Float), default=lambda: Float(0.1), help='minimum nose frequency: if the frequency estimated from the vibrational spectrum is lower than this value, this value is used')
 
         spec.outline(
             cls.setup,
@@ -959,7 +963,8 @@ currently only the first element of the list is used.
                                 self.get_cp_resources_cg (),
                                 additional_parameters=self.inputs.additional_parameters_cp.get_dict(),
                                 ion_velocities = self.ctx.start_velocities_A_au if 'start_velocities_A_au' in self.ctx else None,
-                                nstep=self.inputs.nstep_initial_cg.value
+                                nstep=self.inputs.nstep_initial_cg.value,
+                                print= lambda x : self.report('[small_equilibration_cg] [builder] {}'.format(x))
                                )
         
         node = self.submit(builder)
@@ -986,7 +991,8 @@ currently only the first element of the list is used.
                                                self.ctx.initial_cg,
                                                mu=mu,
                                                resources=params,
-                                               cmdline=self.ctx.cmdline_cp
+                                               cmdline=self.ctx.cmdline_cp,
+                                               print= lambda x : self.report('[emass_benchmark] [builder] {}'.format(x))
                                              )
             sub=self.submit(calc)
             self.to_context(emass_benchmark=append_(sub))
@@ -1008,7 +1014,8 @@ currently only the first element of the list is used.
                                                    resources=params,
                                                    copy_mu_mucut=True,
                                                    dt=dt,
-                                                   cmdline=self.ctx.cmdline_cp
+                                                   cmdline=self.ctx.cmdline_cp,
+                                                   print= lambda x : self.report('[dt_benchmark] [builder] {}'.format(x))
                                                    )
                     sub=self.submit(newcalc)
                     self.to_context(dt_benchmark=append_(sub))
@@ -1172,7 +1179,13 @@ currently only the first element of the list is used.
         vdos_maxs={}
         for calc in self.ctx.dt_benchmark:
             if calc.is_finished_ok:
-                vdos_maxs[calc.pk]=get_maximum_frequency_vdos(calc.outputs.output_trajectory)
+                vdos_v = self.inputs.default_nose_frequency
+                if hasattr(calc.outputs, 'output_trajectory'):
+                    if calc.outputs.output_trajectory.get_array('times').shape[0] >= self.inputs.min_traj_steps_vdos.value:
+                        vdos_v=get_maximum_frequency_vdos(calc.outputs.output_trajectory)
+                        if abs(vdos_v.value) < abs(minimum_nose_frequency.value):
+                            vdos_v = self.inputs.minimum_nose_frequency
+                vdos_maxs[calc.pk]=vdos_v
         self.ctx.vdos_maxs=vdos_maxs
         self.report('[analysis_step] maximum of vibrational spectra: {}'.format(vdos_maxs))
         #analyze forces ratio
@@ -1450,8 +1463,9 @@ currently only the first element of the list is used.
                 report('[fix_last_nve] resubmitting it')
                 resend=self.ctx.last_nve[-1].get_builder_restart()
                 self.ctx.retry_count=self.ctx.retry_count+1
-                self.to_context(resubmit=self.submit(resend))
-                self.ctx.last_nve[-1]=self.ctx.resubmit
+                del(self.ctx.last_nve[-1])
+                sub=self.submit(resend)
+                self.to_context(last_nve=append_(sub))
                 return 1
             else:
                 report('[fix_last_nve] not teached how to deal with this, sorry')
@@ -1580,7 +1594,9 @@ currently only the first element of the list is used.
                    nstep=1,
                    remove_parameters_namelist=['CELL'],
                    additional_parameters={'IONS':{'ion_temperature': 'not_controlled'} },
-                   cmdline=['-ntg', '1', '-nb', '1']            )
+                   cmdline=['-ntg', '1', '-nb', '1'],
+                   print= lambda x : self.report('[final_cg] [builder] {}'.format(x))
+              )
         sub=self.submit(final_cg)
         self.to_context(last_nve=append_(sub))
         if True: #self.ctx.cg_scratch or cg_reset_emass_dt:
