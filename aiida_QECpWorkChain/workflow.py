@@ -799,6 +799,9 @@ currently only the first element of the list is used.
         spec.input('min_traj_steps_vdos', valid_type=(Int), default=lambda: Int(100), help='minimum number of steps to consider the calculated vibrational spectrum maximum valid, to set the thermostat frequency')
         spec.input('default_nose_frequency', valid_type=(Float), default=lambda: Float(10.0), help='default nose frequency when a frequency cannot be estimated from the vibrational spectrum')
         spec.input('minimum_nose_frequency', valid_type=(Float), default=lambda: Float(0.1), help='minimum nose frequency: if the frequency estimated from the vibrational spectrum is lower than this value, this value is used')
+        spec.input('temperature_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Temperature tolerance in K used to say if the npt is equilibrated')
+        spec.input('pressure_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Pressure tolerance in kBar used to say if the npt is equilibrated')
+       
 
         spec.outline(
             cls.setup,
@@ -1183,7 +1186,7 @@ currently only the first element of the list is used.
                 if hasattr(calc.outputs, 'output_trajectory'):
                     if calc.outputs.output_trajectory.get_array('times').shape[0] >= self.inputs.min_traj_steps_vdos.value:
                         vdos_v=get_maximum_frequency_vdos(calc.outputs.output_trajectory)
-                        if abs(vdos_v.value) < abs(minimum_nose_frequency.value):
+                        if abs(vdos_v.value) < abs(self.inputs.minimum_nose_frequency.value):
                             vdos_v = self.inputs.minimum_nose_frequency
                 vdos_maxs[calc.pk]=vdos_v
         self.ctx.vdos_maxs=vdos_maxs
@@ -1630,12 +1633,16 @@ currently only the first element of the list is used.
         pstd=p.std()
         self.report('[equil_not_ok] T={} std(T)={}'.format(tm,tstd))
         self.report('[equil_not_ok] p={} std(p)={}'.format(pm,pstd))
+        if self.inputs.temperature_tolerance.value > 0:
+            tstd=self.inputs.temperature_tolerance.value
+        if self.inputs.pressure_tolerance.value > 0:
+            pstd=self.inputs.pressure_tolerance/10.0
         if abs(tm-float(self.ctx.tempw_current))<tstd and abs(pm-float(self.ctx.pressure_current)/10.0)<pstd:
             #we completed this step
             self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
             self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,len(self.inputs.thermobarostat_points)))
         else:
-            self.report('[equil_not_ok] repeating thermo cycle {}/{}'.format(self.ctx.idx_thermo_cycle,len(self.inputs.thermobarostat_points)))
+            self.report('[equil_not_ok] repeating thermo cycle {}/{}'.format(self.ctx.idx_thermo_cycle+1,len(self.inputs.thermobarostat_points)))
        
         if self.ctx.idx_thermo_cycle >= len(self.inputs.thermobarostat_points):
             self.report('[equil_not_ok] equilibrated')
