@@ -517,11 +517,14 @@ def get_structures_from_trajectory(traj,every=1):
 
 def generate_pw_from_trajectory(pwcode, start_from,
                                     skip=1, numcalc=0,
-                                    resources=None
+                                    resources=None,
+                                    traj=None,
+                                    nbnd=None
                                 ):
     start_from = get_node(start_from)
     pseudos = get_pseudo_from_inputs(start_from)
-    traj=start_from.outputs.output_trajectory
+    if traj is None:
+        traj=start_from.outputs.output_trajectory
     if numcalc==0 and skip>0:
         pass
     elif numcalc>0 and skip==1:
@@ -560,6 +563,8 @@ def generate_pw_from_trajectory(pwcode, start_from,
             'ELECTRONS' : {
             },
         }
+        if nbnd is not None:
+            parameters['SYSTEM']['nbnd'] = nbnd
         builder.settings = Dict(dict={'gamma_only': True})
         builder.parameters = Dict(dict=parameters)
         if resources is not None:
@@ -835,7 +840,7 @@ currently only the first element of the list is used.
                 while_(cls.check_nve_nose)(
                     cls.run_nve, # append to ctx.last_nve; eventually SET NEW MASSES of ion if self.ctx.find_new_ion_masses is True
                     # check slope of ekinc and econt, correct and eventually do a new final_cg
-                    cls.prepare_check_slope,
+                    while_(cls.prepare_check_slope)(),
                     cls.check_slope,
                     if_(cls.check_slope_not_ok)(
                         #change emass and dt
@@ -1081,7 +1086,11 @@ currently only the first element of the list is used.
         print ('return value from analysis_step: ',res)
 
     def prepare_check_slope(self):
+        res=self.fix_last_nve(report=lambda x : self.report('[prepare_check_slope] {}'.format(x)))
+        if res == 1:       
+            return True
         self.ctx.check_slope_simulation=self.ctx.last_nve[-1]
+        return False
 
     def check_slope(self):
         self.report('[check_slope] beginning')

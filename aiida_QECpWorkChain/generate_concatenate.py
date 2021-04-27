@@ -79,7 +79,7 @@ def concatenate_traj{}({}):
 
 case+='''
     idx=int(len(trajs)//2)
-    return merge_many_trajs(trajs[:idx],unique) + merge_many_trajs(trajs[idx:],unique)
+    return merge_many_trajs([merge_many_trajs(trajs[:idx],unique), merge_many_trajs(trajs[idx:],unique)], unique)
 '''
 if __name__ == "__main__":
     print(res)
