@@ -167,6 +167,53 @@ def get_atomic_types_and_masks(type_array):
         outnames.append(name)
     return zip(outnames,masks)
 
+def get_concat_arrays(names, l ):
+    outs=[]
+    for name in names:
+        out=np.array([])
+        for c in l:
+            if not 'output_trajectory' in c.outputs:
+                continue
+            out=np.concatenate([out,c.outputs.output_trajectory.get_array(name)])
+        outs.append(out)
+    return outs
+
+def get_pk_list(l):
+    pks=[]
+    for c in l:
+       pks.append(l.pk)
+    return pks
+
+
+##ugly hack section, most for testing
+class INSPECTOR(object):
+    def __init__(self,name=''):
+       self.attrib_called=[]
+       self.name=name
+        
+    def __call__(self,*args,**kwargs):
+       newctx=INSPECTOR('()')
+       self.attrib_called.append(newctx)
+       return newctx
+    def __repr__(self):
+        return self.__str__()
+        
+    def __getattribute__(self, name):
+       if name=='attrib_called' or name=='name' or name=='__init__' or name == '__call__' or name == '__repr__':
+          return object.__getattribute__(self,name)
+       if name=='__str__':
+          def callabl():
+             s=''
+             for c in self.attrib_called:
+                s=s+' '+c.__str__()
+             res=f'{self.name} [{s}]'
+             return res
+          return callabl
+       newctx=INSPECTOR(name)
+       self.attrib_called.append(newctx)
+       return newctx
+
+
 
 
 ##tools to move repository's files around in the file system (useful when you run out of space)

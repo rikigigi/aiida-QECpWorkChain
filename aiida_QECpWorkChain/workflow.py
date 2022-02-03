@@ -238,7 +238,7 @@ def configure_cp_builder_restart(code,
         raise ValueError('emass parameter not found in input dictionary!')
     if dt is not None:
         if not from_scratch:
-            if abs(parameters['CONTROL']['dt'] - dt) > 1e-5 and dtchange:
+            if abs(float(parameters['CONTROL']['dt']) - dt) > 1e-5 and dtchange:
                 parameters['IONS']['ion_velocities'] = 'change_step'
                 parameters['IONS']['tolp'] = parameters['CONTROL']['dt']
                 parameters['ELECTRONS']['electron_velocities'] = 'change_step'
@@ -393,8 +393,13 @@ def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax_=None,minpk
     else:
         return res
 
-
 def ekinc_const_motion_analysis(traj):
+    return ekinc_const_motion_analysis_2(traj.get_array('times'),
+                                         traj.get_array('electronic_kinetic_energy'),
+                                         traj.get_array('energy_constant_motion'),
+                                         traj.numsites)
+
+def ekinc_const_motion_analysis_2(tps, ekinc, cmot, natoms):
     """Convert electronic kinetic energy in K and then does a fit.
     Returns angular coefficient in K/ps.
     This is the true quantity that you are interested in, since this
@@ -404,16 +409,12 @@ def ekinc_const_motion_analysis(traj):
     With those two numbers you are able to decide if your timestep
     and your emass are good or not.
     """
-    natoms=traj.numsites
     #conversion factor from eV to K
     k_b=8.617333262145e-5 #eV/K
     eV_to_K=2/(3*k_b*natoms)
-    tps=traj.get_array('times') #in ps
-    ekinc=traj.get_array('electronic_kinetic_energy')*eV_to_K #now in K
-    cmot=traj.get_array('energy_constant_motion')*eV_to_K #now in K
     
-    fit_ekinc=np.polyfit(tps,ekinc,1)
-    fit_cmot=np.polyfit(tps,cmot,1)
+    fit_ekinc=np.polyfit(tps,ekinc*eV_to_K,1)
+    fit_cmot=np.polyfit(tps,cmot*eV_to_K,1)
     return fit_ekinc, fit_cmot
 
 #various calcfunctions
@@ -840,7 +841,9 @@ currently only the first element of the list is used.
                 while_(cls.check_nve_nose)(
                     cls.run_nve, # append to ctx.last_nve; eventually SET NEW MASSES of ion if self.ctx.find_new_ion_masses is True
                     # check slope of ekinc and econt, correct and eventually do a new final_cg
-                    while_(cls.prepare_check_slope)(),
+                    while_(cls.prepare_check_slope)(
+                       cls.nothing
+                    ),
                     cls.check_slope,
                     if_(cls.check_slope_not_ok)(
                         #change emass and dt
@@ -876,6 +879,9 @@ currently only the first element of the list is used.
         spec.output('emass')
         spec.output('cmdline_cp')
         spec.output('kinds')
+
+    def nothing(self):
+        pass
 
     def emass_dt_not_ok(self):
         return bool(self.ctx.emass_dt_not_ok)
@@ -1092,6 +1098,23 @@ currently only the first element of the list is used.
         self.ctx.check_slope_simulation=self.ctx.last_nve[-1]
         return False
 
+    def test_check_slope_prepare(self, newctx):
+        class CTX:
+            def __init__(self,name=''):
+               self.attrib_called=[]
+               self.name=''
+            def __getattribute__(self, name):
+               if name=='attrib_called':
+                  return super().__getattribute__(name)
+               if name=='__str__':
+                  res=f'{name} {[c.__str__() for c in self.attrib_called]}'
+               newctx=CTX(name)
+               self.attrib_called.append(newctx)
+               return newctx
+
+             
+        self.ctx=CTX('ctx')
+
     def check_slope(self):
         self.report('[check_slope] beginning')
         self.ctx.max_slope_ok=True
@@ -1103,10 +1126,13 @@ currently only the first element of the list is used.
            self.ctx.max_slope_emass=sim.inputs.parameters['ELECTRONS']['emass']
            self.ctx.max_slope_dt=sim.inputs.parameters['CONTROL']['dt']
            self.ctx.max_slope_emass_cut=sim.inputs.parameters['ELECTRONS']['emass_cutoff']
-           traj=sim.outputs.output_trajectory 
-           ek, cm = ekinc_const_motion_analysis(traj)
-           self.report('[check_slope] pk={} (ekinc, econs) linear fit = ({}, {})'.format(sim.pk,ek, cm))
-           tps=get_total_time([sim])
+
+           simulation_check_list = self.ctx.last_nve[self.ctx.after_last_cg_idx:]
+           tps, ekinc, cmot = get_concat_arrays(['times','electronic_kinetic_energy','energy_constant_motion'], simulation_check_list) 
+           natoms = self.ctx.check_slope_simulation.outputs.output_trajectory.numsites
+           ek, cm = ekinc_const_motion_analysis_2(tps, ekinc, cmot, natoms)
+           self.report('[check_slope] pk={} (ekinc, econs) linear fit = ({}, {})'.format(get_pk_list(simulation_check_list),ek, cm))
+           tps=get_total_time(simulation_check_list)
            if tps<float(self.inputs.max_slope_min_ps):
                self.report('[check_slope] the simulation is not long enough: not considering the result of the linear fit')
            else:
@@ -1609,6 +1635,7 @@ currently only the first element of the list is used.
                    cmdline=['-ntg', '1', '-nb', '1'],
                    print= lambda x : self.report('[final_cg] [builder] {}'.format(x))
               )
+        self.ctx.after_last_cg_idx=len(self.ctx.last_nve)+1
         sub=self.submit(final_cg)
         self.to_context(last_nve=append_(sub))
         if True: #self.ctx.cg_scratch or cg_reset_emass_dt:
