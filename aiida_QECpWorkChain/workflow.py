@@ -1492,7 +1492,7 @@ currently only the first element of the list is used.
             'CELL': {
                 'cell_dynamics': 'pr',
                 'press': float(self.ctx.pressure_current),
-                'cell_dofree': 'volume' if ibrav == 1 else 'xyz',
+                'cell_dofree': 'volume' if ibrav == 1 else 'all',
             },
         }
         dt,emass,off=self.ctx.dt_emass_off
