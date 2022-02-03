@@ -466,15 +466,6 @@ def are_same_kind(k1_,k2_):
     except KeyError:
         return False
 
-#@calcfunction #does not work
-def listizer(*args):
-    '''
-    return the arguments packed in a List. use as listizer(*list)
-    '''
-    return List(list=list(args))
-
-
-
 @calcfunction
 def collapse_kinds(structure):
     attr=structure.get_attribute('kinds')
@@ -647,19 +638,6 @@ def to_ArrayData(a,key):
 
 
 from .generate_concatenate import *
-#def merge_many_traj(cplist,unique=True):
-#    res=None
-#    for cp in cplist:
-#        if res is not None:
-#            if 'output_trajectory' in cp.outputs:
-#                if unique:
-#                    res=merge_traj(res,cp.outputs.output_trajectory)
-#                else:
-#                    res=concatenate_traj(res,cp.outputs.output_trajectory)
-#        else:
-#            if 'output_trajectory' in cp.outputs:
-#                res=cp.outputs.output_trajectory
-#    return res
 
 def factors(nr):
     i = 2
@@ -764,49 +742,39 @@ class CpWorkChain(WorkChain):
 currently only the first element of the list is used.
 'wallclock' is the maximum time that can be requested to the scheduler. This code can decide to ask for less.
 """)
-        spec.input('cp_resources_cg_list',valid_type=(List),required=True,help='Same as cp_resources_cp_list but when doing a CG.')
-        spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None )
+        spec.input('cp_resources_cg_list',valid_type=(List),required=True,help='Same as cp_resources_cp_list but when doing a CG. The CG uses a different amount of resource and can use no band or task group parallelization.')
+        spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None, help='The forces calculated by the Car-Parrinello method are affected by two types of error: one is due to the oscillations of the electrons around the DFT energy minimum, and the second is due to the finite mass of the electronic fluid that produces a _sistematic_ error in the forces, as if the electrons add mass to the ionic core. This second kind of error is can be controlled by this parameter, that tries to adjust the electronic mass to obtain the desidered ratio between CP forces and true DFT forces. Then you may want to modify the ionic mass to correct the leading factor of this error.' )
         spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}),
                    help='parameters that will be included in the settings input of the QE CP plugin. These settings will be added on top of the default one. Same format as plugin input')
-        spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]))
-        #spec.input('emass_list', valid_type=(List), default=lambda: List(list=[1.0,1.0,8.0,25.0]))
-        spec.input('emass_list', valid_type=(List), default=lambda: List(list=[50.0, 75.0, 100.0]))
+        spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]),help='list of timesteps to try. Timesteps are changed to better integrate the equation of motion. When a new electronic mass is selected by this workchain timesteps are automatically adjusted.')
+        spec.input('emass_list', valid_type=(List), default=lambda: List(list=[50.0, 75.0, 100.0]),help='list of electronic masses to try. The emass is selected in order to satisfy the requested CP/DFT force ratio.')
         spec.input('number_of_pw_per_trajectory', valid_type=(Int), default=lambda: Int(100),
                    help='Number of pw submitted for every trajectory during calculation of force ratio.')
         spec.input('skip_emass_dt_test',valid_type=(Bool), default=lambda: Bool(False))
-        spec.input('adjust_ionic_mass', valid_type=(Bool), default=lambda: Bool(False), help='Multiply the mass of the ions by the corresponding force ration between the cp forces and pw forces -- that is less than 1')
+        spec.input('adjust_ionic_mass', valid_type=(Bool), default=lambda: Bool(True), help='Multiply the mass of the ions by the corresponding force ration between the cp forces and pw forces -- that is less than 1. Note that averages of static properties do not depend on the ionic masses.')
         spec.input('skip_thermobarostat',valid_type=(Bool),  default=lambda: Bool(False))
         spec.input('nve_required_picoseconds',valid_type=(Float), default=lambda: Float(50.0),
-                  help='The equilibrated NVE simulation will last at least this number of picoseconds')
-        #spec.input('nose_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0),
-        #          help='Each of the (many) thermobarostating run will last at least this number of picoseconds')
-        #spec.input('nose_eq_required_picoseconds',valid_type=(Float), default=lambda: Float(5.0))
+                  help='The equilibrated NVE simulation will last at least this number of picoseconds. How much picoseconds do you want?')
         spec.input('tempw_initial_random',valid_type=(Float), required=False, help='If provided, sets the initial temperature when randomly initializing the starting velocities.')
-        #spec.input('tempw', required=True, valid_type=(Float),validator=validate_tempw,
-        #           help='Target temperature (K). It is used if thermostat is used and in initial random velocity initialization, if used and if tempw_initial_random is not provided')
-        #spec.input('pressure', required=False, valid_type=(Float),
-        #           help='Target pressure (KBar or 0.1GPa). Useful only if thermostat is used.')
-        #spec.input('tempw_initial_nose',valid_type=(Float), required=False, help='Thermostat temperature of the first nose cycle. Then the temperature will be set linearly in between this temperature and tempw, for every nose cycle.')
-        #spec.input('nthermo_cycle',valid_type=(Int), default=lambda: Int(2),help='Number of nose cycles')
-        spec.input('thermobarostat_points',valid_type=(List),help='List of dicts, each with the format [ { "temperature_K": 1000, "pressure_KBar": 10 , "equilibration_time_ps": 5.0, "thermostat_time_ps": 5.0} ]. The simulation will loop over this list of dictionaries, in the same order, equilibrating for the specified time at the given P,T point.')
-        spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50))
-        spec.input('initial_atomic_velocities_A_ps',valid_type=(ArrayData),required=False)
-        spec.input('dt',valid_type=(Float),required=False,help='timestep in atomic units')
-        spec.input('emass',valid_type=(Float),required=False,help='electronic mass, atomic mass units')
+        spec.input('thermobarostat_points',valid_type=(List),help='List of dicts, each with the format [ { "temperature_K": 1000, "pressure_KBar": 10 , "equilibration_time_ps": 5.0, "thermostat_time_ps": 5.0} ]. The simulation will loop over this list of dictionaries, in the same order, equilibrating for the specified time at the given P,T point. Every point is repeated if the average T and P are not within the specified ranges')
+        spec.input('nstep_initial_cg',valid_type=(Int), default=lambda: Int(50), help='At the beginning of the simulation the CP algorithm is not used. This is the number of steps to do using Born-Oppenheimer molecular dynamics algorithm with a conjugate gradient minimization of the electronic ground state.')
+        spec.input('initial_atomic_velocities_A_ps',valid_type=(ArrayData),required=False,help='optional input initial velocities in angstrom over picoseconds')
+        spec.input('dt',valid_type=(Float),required=False,help='timestep in atomic units, if not automatically chosen.')
+        spec.input('emass',valid_type=(Float),required=False,help='electronic mass, atomic mass units, if not automatically chosen')
         spec.input('cmdline_cp',valid_type=(List), required=False,help='additional command line parameters of the cp verlet caclulations only (for example parallelization options)')
-        spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False))
-        spec.input('nstep_parallel_test',valid_type=(Int), default=lambda: Int(200))
+        spec.input('skip_parallel_test',valid_type=(Bool),default=lambda: Bool(False), help='do not run run benchmarks to discover a good internal Quantum Espresso parallelization scheme for the current system')
+        spec.input('nstep_parallel_test',valid_type=(Int), default=lambda: Int(200),help='the benchmark simulations will be that long, if performed')
         spec.input('benchmark_parallel_walltime_s',valid_type=(Float), default=lambda: Float(600.0),help='time requested to the scheduler during the test for finding the best parallelization parameters.')
         spec.input('benchmark_emass_dt_walltime_s',valid_type=(Float), default=lambda: Float(1200.0),help='same as benchmark_parallel_walltime_s but for dermining the best electronic mass and timestep.')
-        spec.input('max_slope_ekinc',valid_type=(Float), default=lambda: Float(0.1),help='max slope in K/ps of the ekinc linear fit')
-        spec.input('max_slope_const',valid_type=(Float), default=lambda: Float(0.05),help='max slope in K/ps of the constant of motion linear fit')
+        spec.input('max_slope_ekinc',valid_type=(Float), default=lambda: Float(0.1),help='max slope in K/ps of the ekinc linear fit. If not satisfied try to change emass')
+        spec.input('max_slope_const',valid_type=(Float), default=lambda: Float(0.05),help='max slope in K/ps of the constant of motion linear fit.')
         spec.input('max_slope_min_ps',valid_type=(Float), default=lambda: Float(1.0),help='minimum required lenght in ps of the last trajectory to do the linear fit on ekinc and const of motion')
-        spec.input('max_slope_min_emass',valid_type=(Float), default=lambda: Float(50.0),help='minimum possible value of electronic mass that can be set by the max_slope correction routine')
+        spec.input('max_slope_min_emass',valid_type=(Float), default=lambda: Float(50.0),help='minimum possible value of electronic mass that can be set by the max_slope correction routine. Will not go lower than that.')
         spec.input('min_traj_steps_vdos', valid_type=(Int), default=lambda: Int(100), help='minimum number of steps to consider the calculated vibrational spectrum maximum valid, to set the thermostat frequency')
         spec.input('default_nose_frequency', valid_type=(Float), default=lambda: Float(10.0), help='default nose frequency when a frequency cannot be estimated from the vibrational spectrum')
         spec.input('minimum_nose_frequency', valid_type=(Float), default=lambda: Float(0.1), help='minimum nose frequency: if the frequency estimated from the vibrational spectrum is lower than this value, this value is used')
-        spec.input('temperature_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Temperature tolerance in K used to say if the npt is equilibrated')
-        spec.input('pressure_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Pressure tolerance in kBar used to say if the npt is equilibrated')
+        spec.input('temperature_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Temperature tolerance in K used to say if the npt is equilibrated. If not setted, use the standard deviation of the T time series')
+        spec.input('pressure_tolerance', valid_type=(Float), default=lambda: Float(-1), help='Pressure tolerance in kBar used to say if the npt is equilibrated. If not setted, use the standard deviation of the P time series')
        
 
         spec.outline(
@@ -1470,13 +1438,6 @@ currently only the first element of the list is used.
             self.ctx.last_nve.append(self.ctx.check1)
         else:
             self.ctx.last_nve=[self.ctx.check1] 
-        #setup intermediate temperatures
-        #if 'tempw_initial_nose' in self.inputs:
-        #    self.ctx.Tstart=self.inputs.tempw_initial_nose.value
-        #elif 'tempw_initial_random' in self.inputs:
-        #    self.ctx.Tstart=self.inputs.tempw_initial_random.value
-        #else:
-        #    self.ctx.Tstart=self.inputs.tempw.value
         self.ctx.idx_thermo_cycle=0
 
     def nose_prepare(self):
@@ -1487,11 +1448,6 @@ currently only the first element of the list is used.
         self.ctx.tempw_current = self.inputs.thermobarostat_points[   int(self.ctx.idx_thermo_cycle)]['temperature_K']
         self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]['pressure_KBar']
         self.ctx.run_nve_ps = self.inputs.thermobarostat_points[      int(self.ctx.idx_thermo_cycle)]['equilibration_time_ps']
-        #if self.inputs.nthermo_cycle.value > 1:
-        #    self.ctx.tempw_current=self.ctx.Tstart + (self.inputs.tempw.value-self.ctx.Tstart)*self.ctx.idx_thermo_cycle/ \
-        #                                  float(self.inputs.nthermo_cycle.value-1)
-        #else:
-        #    self.ctx.tempw_current=self.inputs.tempw.value
 
     def fix_last_nve(self,report):
         if not self.ctx.last_nve[-1].is_finished_ok:
