@@ -13,24 +13,24 @@ qeunits=qe_tools.CONSTANTS
 
 from .utils import *
 
-def validate_structure(structure_or_trajectory):
+def validate_structure(structure_or_trajectory,port):
     return
 
-def validate_pseudo_family(pseudo_family_str):
+def validate_pseudo_family(pseudo_family_str,port):
     return
 
-def validate_cp_list(cp_code):
+def validate_cp_list(cp_code,port):
     return
 
-def validate_pw_list(pw_code):
+def validate_pw_list(pw_code,port):
     return
 
-def validate_ecutwfc(ecutwfc):
+def validate_ecutwfc(ecutwfc,port):
     if ecutwfc <= 0.0:
         return 'ecutwfc must be a positive number'
     return
 
-def validate_tempw(tempw):
+def validate_tempw(tempw,port):
     if tempw <= 0.0:
         return 'tempw must be a positive number'
     return
@@ -371,9 +371,9 @@ def analyze_forces_ratio(pwcalcjobs,fthreshold=0.1,corrfactor=1.0,ax_=None,minpk
             for element in atom_forces[emass][dt]['fratios'].keys():
                 mask=atom_forces[emass][dt]['forces'][element]>fthreshold
                 res.setdefault(emass,{}).setdefault(dt,{})[element]={
-                    'forces_std': atom_forces[emass][dt]['forces'][element][mask].std(),
-                    'fratios_mean': atom_forces[emass][dt]['fratios'][element][mask].mean()*corrfactor,
-                    'fratios_std': atom_forces[emass][dt]['fratios'][element][mask].std()*corrfactor,
+                    'forces_std': float(atom_forces[emass][dt]['forces'][element][mask].std()),
+                    'fratios_mean': float(atom_forces[emass][dt]['fratios'][element][mask].mean()*corrfactor),
+                    'fratios_std': float(atom_forces[emass][dt]['fratios'][element][mask].std()*corrfactor),
                     'PK': atom_forces[emass][dt]['PK'],
                     'fig_idx': ax_counter
                 }
@@ -739,11 +739,11 @@ class CpWorkChain(WorkChain):
  'queue' : 'queue_name',
  'account': 'account_name',
 }
-currently only the first element of the list is used.
+c,porturrently only the first element of the list is used.
 'wallclock' is the maximum time that can be requested to the scheduler. This code can decide to ask for less.
 """)
         spec.input('cp_resources_cg_list',valid_type=(List),required=True,help='Same as cp_resources_cp_list but when doing a CG. The CG uses a different amount of resource and can use no band or task group parallelization.')
-        spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None, help='The forces calculated by the Car-Parrinello method are affected by two types of error: one is due to the oscillations of the electrons around the DFT energy minimum, and the second is due to the finite mass of the electronic fluid that produces a _sistematic_ error in the forces, as if the electrons add mass to the ionic core. This second kind of error is can be controlled by this parameter, that tries to adjust the electronic mass to obtain the desidered ratio between CP forces and true DFT forces. Then you may want to modify the ionic mass to correct the leading factor of this error.' )
+        spec.input('target_force_ratio', valid_type=(Float), default=lambda: Float(0.9), validator= lambda a,port: 'target_force_ratio must be between 0 and 1' if a>=1.0 or a<=0.0 else None, help='The forces calculated by the Car-Parrinello method are affected by two types of error: one is due to the oscillations of the electrons around the DFT energy minimum, and the second is due to the finite mass of the electronic fluid that produces a _sistematic_ error in the forces, as if the electrons add mass to the ionic core. This second kind of error is can be controlled by this parameter, that tries to adjust the electronic mass to obtain the desidered ratio between CP forces and true DFT forces. Then you may want to modify the ionic mass to correct the leading factor of this error.' )
         spec.input('additional_parameters_cp', valid_type=(Dict),default=lambda: Dict(dict={}),
                    help='parameters that will be included in the settings input of the QE CP plugin. These settings will be added on top of the default one. Same format as plugin input')
         spec.input('dt_start_stop_step', valid_type=(List), default=lambda: List(list=[2.0,4.0,20.0]),help='list of timesteps to try. Timesteps are changed to better integrate the equation of motion. When a new electronic mass is selected by this workchain timesteps are automatically adjusted.')
@@ -972,6 +972,7 @@ currently only the first element of the list is used.
                                                self.get_cp_code(),
                                                self.ctx.initial_cg,
                                                mu=mu,
+                                               dt=float(np.arange(*self.inputs.dt_start_stop_step)[0]), 
                                                resources=params,
                                                cmdline=self.ctx.cmdline_cp,
                                                print= lambda x : self.report('[emass_benchmark] [builder] {}'.format(x))
@@ -1214,16 +1215,17 @@ currently only the first element of the list is used.
                 val.append(res[emass][dt][atom]['fratios_mean'] - res[emass][dt][atom]['fratios_std'])
                 diff.append(res[emass][dt][atom]['fratios_mean'] - target_force_ratio)
             diff=np.array(diff)
+            diff_min=float(diff.min())
             val=np.array(val)
             #if values are too near zero, this is garbage
             if min(val) < 0:
                 return RatioGoodness.GARBAGE, min(val)
-            if abs(diff.min()) < fratio_threshold: # ratios are ok
-                return RatioGoodness.OK, abs(diff.min())
-            elif diff.min() < - fratio_threshold: # ratios are too small
-                return RatioGoodness.TOO_SMALL, abs(diff.min())
-            elif diff.min() > fratio_threshold: #ratios are too big
-                return RatioGoodness.TOO_BIG, abs(diff.min())
+            if abs(diff_min) < fratio_threshold: # ratios are ok
+                return RatioGoodness.OK, abs(diff_min)
+            elif diff_min < - fratio_threshold: # ratios are too small
+                return RatioGoodness.TOO_SMALL, abs(diff_min)
+            elif diff_min > fratio_threshold: #ratios are too big
+                return RatioGoodness.TOO_BIG, abs(diff_min)
                 
 
         candidates=[]

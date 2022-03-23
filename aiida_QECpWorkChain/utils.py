@@ -181,7 +181,7 @@ def get_concat_arrays(names, l ):
 def get_pk_list(l):
     pks=[]
     for c in l:
-       pks.append(l.pk)
+       pks.append(c.pk)
     return pks
 
 
