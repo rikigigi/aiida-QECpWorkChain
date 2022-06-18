@@ -511,10 +511,14 @@ def generate_pw_from_trajectory(pwcode, start_from,
                                     skip=1, numcalc=0,
                                     resources=None,
                                     traj=None,
-                                    nbnd=None
+                                    nbnd=None,
+                                    pseudos = None,
+                                    ecutwfc = None,
                                 ):
-    start_from = get_node(start_from)
-    pseudos = get_pseudo_from_inputs(start_from)
+    if start_from is not None:
+       start_from = get_node(start_from)
+    if pseudos is None:
+        pseudos = get_pseudo_from_inputs(start_from)
     if traj is None:
         traj=start_from.outputs.output_trajectory
     if numcalc==0 and skip>0:
@@ -550,7 +554,7 @@ def generate_pw_from_trajectory(pwcode, start_from,
                # 'disk_io': 'none',
             },
             'SYSTEM' : {
-                'ecutwfc': start_from.inputs.parameters.get_dict()['SYSTEM']['ecutwfc'],
+                'ecutwfc': start_from.inputs.parameters.get_dict()['SYSTEM']['ecutwfc'] if ecutwfc is None else ecutwfc,
             },
             'ELECTRONS' : {
             },
@@ -1448,7 +1452,12 @@ c,porturrently only the first element of the list is used.
         self.ctx.nose_start=len(self.ctx.last_nve)
         self.ctx.run_nose_ps = self.inputs.thermobarostat_points[     int(self.ctx.idx_thermo_cycle)]['thermostat_time_ps']
         self.ctx.tempw_current = self.inputs.thermobarostat_points[   int(self.ctx.idx_thermo_cycle)]['temperature_K']
-        self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]['pressure_KBar']
+        if 'pressure_KBar' in self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]:
+            self.ctx.pressure_current = self.inputs.thermobarostat_points[int(self.ctx.idx_thermo_cycle)]['pressure_KBar']
+            self.ctx.do_pr = True
+        else:
+            self.ctx.do_pr = False
+            self.ctx.pressure_current = float('nan')
         self.ctx.run_nve_ps = self.inputs.thermobarostat_points[      int(self.ctx.idx_thermo_cycle)]['equilibration_time_ps']
 
     def fix_last_nve(self,report):
@@ -1483,7 +1492,7 @@ c,porturrently only the first element of the list is used.
         ibrav = self.ctx.last_nve[-1].inputs.parameters.get_dict()['SYSTEM'].get('ibrav',0)
         nose_pr_param={
             'CONTROL': {
-                'calculation': 'vc-cp',
+                'calculation': 'vc-cp' if self.ctx.do_pr else 'cp',
             },
             'IONS': { 
                 'ion_temperature': 'nose',
@@ -1491,12 +1500,14 @@ c,porturrently only the first element of the list is used.
                 'fnosep': self.ctx.fnosep,
                 'nhpcl' : 3,
             },
-            'CELL': {
+        }
+        if self.ctx.do_pr:
+            nose_pr_param['CELL'] = {
                 'cell_dynamics': 'pr',
                 'press': float(self.ctx.pressure_current),
                 'cell_dofree': 'volume' if ibrav == 1 else 'all',
-            },
-        }
+            }
+        
         dt,emass,off=self.ctx.dt_emass_off
         newcalc=configure_cp_builder_restart(                
                 self.get_cp_code(),                  
@@ -1510,9 +1521,8 @@ c,porturrently only the first element of the list is used.
                    print= lambda x : self.report('[nose] [builder] {}'.format(x))
              )                                       
         sub=self.submit(newcalc)
-        self.to_context(last_nve=append_(sub))       
-        self.report('[nose] sent to context pk,dt,emass,tempw,fnosep,press={},{},{},{},{},{}'.format(
-                  sub.pk, dt, emass, float(self.ctx.tempw_current), self.ctx.fnosep, float(self.ctx.pressure_current)))
+        self.to_context(last_nve=append_(sub)) 
+        self.report(f'[nose] sent to context pk,dt,emass,tempw,fnosep,press={sub.pk},{dt},{emass},{float(self.ctx.tempw_current)},{self.ctx.fnosep},{float(self.ctx.pressure_current) if self.ctx.do_pr else "fixed_cell"}')
         return        
    
     def check_nose(self):
@@ -1631,7 +1641,7 @@ c,porturrently only the first element of the list is used.
             tstd=self.inputs.temperature_tolerance.value
         if self.inputs.pressure_tolerance.value > 0:
             pstd=self.inputs.pressure_tolerance/10.0
-        if abs(tm-float(self.ctx.tempw_current))<tstd and abs(pm-float(self.ctx.pressure_current)/10.0)<pstd:
+        if abs(tm-float(self.ctx.tempw_current))<tstd and ( (not self.ctx.do_pr) or ( abs(pm-float(self.ctx.pressure_current)/10.0) < pstd ) ):
             #we completed this step
             self.ctx.idx_thermo_cycle = self.ctx.idx_thermo_cycle + 1
             self.report('[equil_not_ok] thermo cycle {}/{} completed'.format(self.ctx.idx_thermo_cycle,len(self.inputs.thermobarostat_points)))
