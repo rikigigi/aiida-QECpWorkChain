@@ -1,6 +1,6 @@
 res='''
 #traj=cp.outputs.output_trajectory
-def merge_trajectories(t,unique=True):
+def merge_trajectories(t,unique=True,tskip=1):
     """
     Merge trajectories taking only one timestep for each timestep id.
     In case of multiple timesteps with the same id if unique is True,
@@ -26,7 +26,7 @@ def merge_trajectories(t,unique=True):
         sortedkeys=list(steps.keys())
         sortedkeys.sort()
         for stepid in sortedkeys:
-            print(stepid)
+        #    print(stepid)
             for arrkey in arraynames:
                 #pick only the last occurence in the trajectory list of each timestep 'stepid'
                 arrays[arrkey].append(steps[stepid][-1][0].get_array(arrkey)[steps[stepid][-1][1]])
@@ -34,9 +34,9 @@ def merge_trajectories(t,unique=True):
     res.set_attribute('symbols',symbols)
     for a in arraynames:
         if unique:
-            res.set_array(a,np.array(arrays[a]))
+            res.set_array(a,np.array(arrays[a])[::tskip])
         else:
-            res.set_array(a,np.concatenate(arrays[a]))
+            res.set_array(a,np.concatenate(arrays[a])[::tskip])
     return res
 '''
 case='''

@@ -499,9 +499,9 @@ def collapse_kinds(structure):
     s.set_attribute('sites',sites)
     return s
 
-def get_structures_from_trajectory(traj,every=1):
+def get_structures_from_trajectory(traj,every=1,stop=-1):
     structures=[]
-    for i in range(0,traj.numsteps,every):
+    for i in range(0,traj.numsteps if stop<0 else stop ,every):
         structures.append(extract_structure_from_trajectory(traj,Int(i)))
     return structures
 
@@ -514,6 +514,7 @@ def generate_pw_from_trajectory(pwcode, start_from,
                                     nbnd=None,
                                     pseudos = None,
                                     ecutwfc = None,
+                                    stop=-1
                                 ):
     if start_from is not None:
        start_from = get_node(start_from)
@@ -529,7 +530,7 @@ def generate_pw_from_trajectory(pwcode, start_from,
             skip=1
     else:
         raise KeyError('cannot specify both skip and numcalc')
-    structures=get_structures_from_trajectory(traj,skip)
+    structures=get_structures_from_trajectory(traj,skip,stop)
     builders=[]
     for structure in structures:
         builder=pwcode.get_builder()
