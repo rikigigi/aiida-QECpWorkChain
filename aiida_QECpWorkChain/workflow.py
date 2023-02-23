@@ -113,8 +113,8 @@ def configure_cp_builder_cg(code,
         for subkey in additional_parameters[key].keys():
             parameters.setdefault(key,{})[subkey]=additional_parameters[key][subkey]
 
-    builder.settings = Dict(dict=settings)
-    builder.parameters = Dict(dict=parameters)
+    builder.settings = Dict(settings)
+    builder.parameters = Dict(parameters)
     builder.metadata.options.resources = resources['resources']
     builder.metadata.options.max_wallclock_seconds = resources['wallclock']
     builder.metadata.options.queue_name = resources['queue']
@@ -270,8 +270,8 @@ def configure_cp_builder_restart(code,
     parameters['CONTROL']['nstep'] = nstep
     parameters['CONTROL']['max_seconds'] = int(wallclock*0.9)
     print(parameters)    
-    builder.parameters = Dict(dict=parameters)
-    builder.settings = Dict(dict=settings)
+    builder.parameters = Dict(parameters)
+    builder.settings = Dict(settings)
     builder.metadata.options.resources = resources_
     builder.metadata.options.max_wallclock_seconds = int(wallclock)
     builder.metadata.options.queue_name = queue
@@ -541,7 +541,7 @@ def generate_pw_from_trajectory(pwcode, start_from,
         #builder.settings = Dict(dict=settings_dict)
         #The functions finds the pseudo with the elements found in the structure.
         builder.pseudos = pseudos
-        KpointsData = DataFactory('array.kpoints')
+        KpointsData = DataFactory('core.array.kpoints')
         kpoints=KpointsData()
         kpoints.set_kpoints_mesh([1,1,1])
         builder.kpoints = kpoints
@@ -562,8 +562,8 @@ def generate_pw_from_trajectory(pwcode, start_from,
         }
         if nbnd is not None:
             parameters['SYSTEM']['nbnd'] = nbnd
-        builder.settings = Dict(dict={'gamma_only': True})
-        builder.parameters = Dict(dict=parameters)
+        builder.settings = Dict({'gamma_only': True})
+        builder.parameters = Dict(parameters)
         if resources is not None:
             builder.metadata.options.resources = resources['resources']
             builder.metadata.options.max_wallclock_seconds = resources['wallclock']
@@ -1776,10 +1776,10 @@ c,porturrently only the first element of the list is used.
         if res1 is not None:
             res1=concatenate_traj2(res1,res)
             self.out('full_traj',res1)
-        cmdline=List(list=self.ctx.last_nve[-1].inputs.settings['cmdline'])
+        cmdline=List(self.ctx.last_nve[-1].inputs.settings['cmdline'])
         cmdline.store()
         self.out('cmdline_cp',cmdline)
-        kinds=List(list=self.ctx.last_nve[-1].inputs.structure.get_attribute('kinds'))
+        kinds=List(self.ctx.last_nve[-1].inputs.structure.get_attribute('kinds'))
         kinds.store()
         self.out('kinds',kinds)        
         return
