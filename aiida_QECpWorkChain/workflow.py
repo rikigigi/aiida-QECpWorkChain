@@ -167,6 +167,7 @@ def configure_cp_builder_restart(code,
     If from_scratch is True, restart the calculation copying velocities and positions from last trajectory output step of start_from, and perform a cg. valid only with cg=True
     '''
     start_from = get_node(start_from)
+    print(start_from)
     builder=code.get_builder()
     #settings_dict = {
     #    'cmdline': ['-n', '16'],
@@ -215,7 +216,7 @@ def configure_cp_builder_restart(code,
     if cmdline is not None:
         settings['cmdline']=cmdline
     
-    builder.pseudos = get_pseudo_from_inputs(start_from)
+    builder.pseudos = start_from.inputs.pseudos
     parameters = copy.deepcopy(start_from.inputs.parameters.get_dict())
     for itemtodel in remove_parameters_namelist:
         parameters.pop(itemtodel,None)
@@ -519,7 +520,7 @@ def generate_pw_from_trajectory(pwcode, start_from,
     if start_from is not None:
        start_from = get_node(start_from)
     if pseudos is None:
-        pseudos = get_pseudo_from_inputs(start_from)
+        pseudos = start_from.inputs.pseudos
     if traj is None:
         traj=start_from.outputs.output_trajectory
     if numcalc==0 and skip>0:
