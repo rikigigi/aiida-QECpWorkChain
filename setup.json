@@ -23,7 +23,7 @@
     "reentry_register": true,
     "install_requires": [
         "aiida-core>=2.0.0,<3.0.0",
-        "aiida-quantumespresso",
+        "aiida-quantumespresso>=4.2.0,<5.0.0",
         "six",
         "voluptuous"
     ],
