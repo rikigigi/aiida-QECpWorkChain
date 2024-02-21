@@ -2,9 +2,10 @@ import copy
 from enum import Enum
 
 import aiida.orm
-from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool
+from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool, load_group
+from aiida_pseudo.groups.family import PseudoPotentialFamily
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
-from aiida.orm.nodes.data.upf import get_pseudos_from_structure
+#from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
 import qe_tools
@@ -57,7 +58,9 @@ def configure_cp_builder_cg(code,
     #}
     #builder.settings = Dict(dict=settings_dict)
     #The functions finds the pseudo with the elements found in the structure.
-    builder.pseudos = aiida.orm.nodes.data.upf.get_pseudos_from_structure(aiida_structure,pseudo_family.value)
+    pseudo_family = load_group(pseudo_family)
+    assert isinstance(pseudo_family,PseudoPotentialFamily)
+    builder.pseudos = pseudo_family.get_pseudos(structure=aiida_structure)
     parameters = {
     'CONTROL' : {
         'calculation': 'cp' ,
