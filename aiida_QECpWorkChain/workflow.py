@@ -850,6 +850,7 @@ c,porturrently only the first element of the list is used.
         spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
         spec.exit_code(408, 'ERROR_MULTIPLE_FAIL', message='Multiple errors in the simulation that cannot fix.')
         spec.exit_code(409, 'ERROR_WRONG_LOGIC', message='This is a bug in the workchain.')
+        spec.exit_code(410, 'ERROR_INITIAL_SIMULATION_FAILED', message='The initial simulation failed. I cannot start to work. Probably the configuration is not suitable for a molecular dynamics run or the trial integration timestep is too big')
         spec.output('nve_prod_traj')
         spec.output('full_traj')
         spec.output('dt')
@@ -1020,6 +1021,8 @@ c,porturrently only the first element of the list is used.
     def compare_forces_pw(self):
         pwcode=self.get_pw_code()
         joblist=[]
+        if not 'dt_benchmark' in self.ctx:
+            return 410
         for calc in self.ctx.dt_benchmark:
             emass,dt,pk=get_emass_dt_pk(calc)
             if calc.is_finished_ok:
