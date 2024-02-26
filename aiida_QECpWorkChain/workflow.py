@@ -58,7 +58,7 @@ def configure_cp_builder_cg(code,
     #}
     #builder.settings = Dict(dict=settings_dict)
     #The functions finds the pseudo with the elements found in the structure.
-    pseudo_family = load_group(pseudo_family)
+    pseudo_family = load_group(pseudo_family if isinstance(pseudo_family,str) else pseudo_family.value)
     assert isinstance(pseudo_family,PseudoPotentialFamily)
     builder.pseudos = pseudo_family.get_pseudos(structure=aiida_structure)
     parameters = {
