@@ -852,12 +852,12 @@ c,porturrently only the first element of the list is used.
         spec.exit_code(408, 'ERROR_MULTIPLE_FAIL', message='Multiple errors in the simulation that cannot fix.')
         spec.exit_code(409, 'ERROR_WRONG_LOGIC', message='This is a bug in the workchain.')
         spec.exit_code(410, 'ERROR_INITIAL_SIMULATION_FAILED', message='The initial simulation failed. I cannot start to work. Probably the configuration is not suitable for a molecular dynamics run or the trial integration timestep is too big')
-        spec.output('nve_prod_traj')
-        spec.output('full_traj')
-        spec.output('dt')
-        spec.output('emass')
-        spec.output('cmdline_cp')
-        spec.output('kinds')
+        spec.output('nve_prod_traj', valid_type=aiida.orm.nodes.data.TrajectoryData, required=True, help='The trajectory of the last NVE simulation')
+        spec.output('full_traj', valid_type=aiida.orm.nodes.data.TrajectoryData, required=True, help='The full merged trajectory of all the simulations')
+        spec.output('dt', valid_type=Float, required=True, help='The best integration timestep found')
+        spec.output('emass', valid_type=Float, required=True, help='The best electronic mass found')
+        spec.output('cmdline_cp', valid_type=List, required=False, help='The best command line parameters for the cp code')
+        spec.output('kinds', valid_type=List, required=False, help='The kinds for the structure with the modified ionic masses')
 
     def nothing(self):
         pass
