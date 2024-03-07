@@ -4,7 +4,6 @@ from enum import Enum
 import aiida.orm
 from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
-from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
 import qe_tools

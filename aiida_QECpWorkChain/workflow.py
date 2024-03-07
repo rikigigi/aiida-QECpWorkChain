@@ -2,9 +2,10 @@ import copy
 from enum import Enum
 
 import aiida.orm
-from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool
+from aiida.orm import Int, Float, Str, List, Dict, ArrayData, Bool, load_group
+from aiida_pseudo.groups.family import PseudoPotentialFamily
 from aiida.engine import WorkChain, calcfunction, ToContext, append_, while_, if_, return_
-from aiida.orm.nodes.data.upf import get_pseudos_from_structure
+#from aiida.orm.nodes.data.upf import get_pseudos_from_structure
 from aiida.plugins.factories import DataFactory
 import numpy as np
 import qe_tools
@@ -57,7 +58,9 @@ def configure_cp_builder_cg(code,
     #}
     #builder.settings = Dict(dict=settings_dict)
     #The functions finds the pseudo with the elements found in the structure.
-    builder.pseudos = aiida.orm.nodes.data.upf.get_pseudos_from_structure(aiida_structure,pseudo_family.value)
+    pseudo_family = load_group(pseudo_family if isinstance(pseudo_family,str) else pseudo_family.value)
+    assert isinstance(pseudo_family,PseudoPotentialFamily)
+    builder.pseudos = pseudo_family.get_pseudos(structure=aiida_structure)
     parameters = {
     'CONTROL' : {
         'calculation': 'cp' ,
@@ -585,10 +588,10 @@ def get_emass_dt_pk(calc):
 
 def get_calc_from_emass_dt(res,emass,dt):
     candidate= get_node(max(res[emass][dt][dict_keys(res,level=2)[0]]['PK']))
-    if not candidate.is_finished_ok:
+    if not calc_finished_ok_or_walltime(candidate):
         pk_max=-1
         for pk in res[emass][dt][dict_keys(res,level=2)[0]]['PK']:
-            if get_node(pk).is_finished_ok and pk>pk_max:
+            if calc_finished_ok_or_walltime(get_node(pk)) and pk>pk_max:
                 pk_max=pk
         if pk_max>=0:
             candidate=get_node(pk_max)
@@ -715,7 +718,8 @@ def fake_function(*args,**kwargs):
     print(args,kwargs)
     return
 
-
+def calc_finished_ok_or_walltime(c):
+    return c.is_finished_ok or c.exit_status == 400
 
 
 class CpWorkChain(WorkChain):
@@ -847,12 +851,13 @@ c,porturrently only the first element of the list is used.
         spec.exit_code(407, 'ERROR_PARALLEL_TEST', message='Parallel test was not succesful, maybe there is something more wrong.')
         spec.exit_code(408, 'ERROR_MULTIPLE_FAIL', message='Multiple errors in the simulation that cannot fix.')
         spec.exit_code(409, 'ERROR_WRONG_LOGIC', message='This is a bug in the workchain.')
-        spec.output('nve_prod_traj')
-        spec.output('full_traj')
-        spec.output('dt')
-        spec.output('emass')
-        spec.output('cmdline_cp')
-        spec.output('kinds')
+        spec.exit_code(410, 'ERROR_INITIAL_SIMULATION_FAILED', message='The initial simulation failed. I cannot start to work. Probably the configuration is not suitable for a molecular dynamics run or the trial integration timestep is too big')
+        spec.output('nve_prod_traj', valid_type=aiida.orm.nodes.data.TrajectoryData, required=True, help='The trajectory of the last NVE simulation')
+        spec.output('full_traj', valid_type=aiida.orm.nodes.data.TrajectoryData, required=True, help='The full merged trajectory of all the simulations')
+        spec.output('dt', valid_type=Float, required=True, help='The best integration timestep found')
+        spec.output('emass', valid_type=Float, required=True, help='The best electronic mass found')
+        spec.output('cmdline_cp', valid_type=List, required=False, help='The best command line parameters for the cp code')
+        spec.output('kinds', valid_type=List, required=False, help='The kinds for the structure with the modified ionic masses')
 
     def nothing(self):
         pass
@@ -994,7 +999,7 @@ c,porturrently only the first element of the list is used.
         params['wallclock']=self.inputs.benchmark_emass_dt_walltime_s.value 
         for calc in self.ctx.emass_benchmark:
             mu,dt,pk=get_emass_dt_pk( calc) 
-            if calc.is_finished_ok:
+            if calc_finished_ok_or_walltime(calc):
                 for dt in np.arange(*self.inputs.dt_start_stop_step):
                     self.report('[dt_benchmark] trying calculation with emass={} dt={}'.format(mu,dt))
                     newcalc=configure_cp_builder_restart(
@@ -1017,9 +1022,11 @@ c,porturrently only the first element of the list is used.
     def compare_forces_pw(self):
         pwcode=self.get_pw_code()
         joblist=[]
+        if not 'dt_benchmark' in self.ctx:
+            return 410
         for calc in self.ctx.dt_benchmark:
             emass,dt,pk=get_emass_dt_pk(calc)
-            if calc.is_finished_ok:
+            if calc_finished_ok_or_walltime(calc):
                 children_calc=get_children_calculation(calc.get_outgoing().all_nodes())
                 if len(children_calc)>0:  #maybe I calculated this stuff before
                     pwcont=0
@@ -1095,7 +1102,7 @@ c,porturrently only the first element of the list is used.
         self.ctx.max_slope_ok=True
         if 'check_slope_simulation' in self.ctx:
            sim=self.ctx.check_slope_simulation
-           if not sim.is_finished_ok:
+           if not calc_finished_ok_or_walltime(sim):
                self.report('[check_slope] simulation to check is not finished ok!')
                return 404
            self.ctx.max_slope_emass=sim.inputs.parameters['ELECTRONS']['emass']
@@ -1191,7 +1198,7 @@ c,porturrently only the first element of the list is used.
         #calculate vibrational spectra to have nice nose frequencies. Simply pick the frequency of the maximum
         vdos_maxs={}
         for calc in self.ctx.dt_benchmark:
-            if calc.is_finished_ok:
+            if calc_finished_ok_or_walltime(calc):
                 vdos_v = self.inputs.default_nose_frequency
                 if hasattr(calc.outputs, 'output_trajectory'):
                     if calc.outputs.output_trajectory.get_array('times').shape[0] >= self.inputs.min_traj_steps_vdos.value:
@@ -1299,7 +1306,7 @@ c,porturrently only the first element of the list is used.
                 #find if there is a broken simulation with emass lower than the current minimum
                 self.report('[analysis_step] try to decrease emass')
 		#TODO is this bugged? will the workchain resubmit always the same calculation over and over, as well as new ones?
-                if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ < too_big_smallest_emass and not calc_.is_finished_ok):
+                if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ < too_big_smallest_emass and not calc_finished_ok_or_walltime(calc_)):
                     return # do it!
                 # pick something lower and run it again!
                 new_emass = too_big_smallest_emass*3.0/4.0
@@ -1323,7 +1330,7 @@ c,porturrently only the first element of the list is used.
             elif increase_emass and decrease_emass: # case 3)
                 #check if there are failed simulations with emass in between the biggest too small and the lowest too big
                 self.report('[analysis_step] try to find emass in the middle')
-                if try_to_fix(test=lambda emass_,dt_,calc_ : emass_ > too_small_biggest_emass and emass_ < too_big_smallest_emass and not calc_.is_finished_ok):
+                if try_to_fix(test=lambda emass_,dt_,calc_ : emass_ > too_small_biggest_emass and emass_ < too_big_smallest_emass and not calc_finished_ok_or_walltime(calc_)):
                     return # do it!
                 # pick something in the middle and run it again!
                 new_emass = (too_small_biggest_emass + too_big_smallest_emass)/2.0
@@ -1348,7 +1355,7 @@ c,porturrently only the first element of the list is used.
             elif increase_emass: #case 2) emass is too low, I can increase it!
                 #check that simulations with higher emass are not failed
                 self.report('[analysis_step] try to increase emass')
-                if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ > too_small_biggest_emass and not calc_.is_finished_ok):
+                if try_to_fix(test=lambda emass_, dt_, calc_:  emass_ > too_small_biggest_emass and not calc_finished_ok_or_walltime(calc_)):
                     return # do it!
                 # pick something lower and run it again!
                 new_emass = too_small_biggest_emass*4.0/3.0
@@ -1433,7 +1440,7 @@ c,porturrently only the first element of the list is used.
             else:
                 self.report('[setup_check1] using default nose freq. {} THz'.format(self.ctx.fnosep))
                 
-            if not self.ctx.check1.is_finished_ok:
+            if not calc_finished_ok_or_walltime(self.ctx.check1):
                 raise RuntimeError('Bug: wrong logic')
         else:
             #we started only with a cg calculation
@@ -1463,7 +1470,7 @@ c,porturrently only the first element of the list is used.
         self.ctx.run_nve_ps = self.inputs.thermobarostat_points[      int(self.ctx.idx_thermo_cycle)]['equilibration_time_ps']
 
     def fix_last_nve(self,report):
-        if not self.ctx.last_nve[-1].is_finished_ok:
+        if not calc_finished_ok_or_walltime(self.ctx.last_nve[-1]):
             report('[fix_last_nve] last_nve with pk={} is failed with {}'.format(self.ctx.last_nve[-1].pk,self.ctx.last_nve[-1].get_attribute_many(['exit_status', 'exit_message'])))
             if self.ctx.retry_count==0:
                 #try to resend calc and hope for the best
