@@ -11,7 +11,6 @@ import numpy as np
 import qe_tools
 qeunits=qe_tools.CONSTANTS
 
-
 from .utils import *
 
 def validate_structure(structure_or_trajectory,port):
@@ -119,8 +118,10 @@ def configure_cp_builder_cg(code,
     builder.settings = Dict(settings)
     builder.parameters = Dict(parameters)
     builder.metadata.options.resources = resources['resources']
-    builder.metadata.options.max_wallclock_seconds = resources['wallclock']
-    builder.metadata.options.queue_name = resources['queue']
+    if 'wallclock' in resources:
+        builder.metadata.options.max_wallclock_seconds = resources['wallclock']
+    if 'queue' in resources:
+        builder.metadata.options.queue_name = resources['queue']
     if 'account' in resources:
         builder.metadata.options.account = resources['account']
     return builder
@@ -129,10 +130,7 @@ def configure_cp_builder_cg(code,
 def get_resources(calc):
     start_from=get_node(calc)
     options=start_from.get_options()
-    if 'account' in options:
-        return options['resources'], options['queue_name'], options['max_wallclock_seconds'], options['account']
-    else:
-        return options['resources'], options['queue_name'], options['max_wallclock_seconds'], None
+    return options['resources'], options['queue_name'] if 'queue_name' in options else None, options['max_wallclock_seconds'], options['account'] if 'account' in options else None
 
 def configure_cp_builder_restart(code,
                                     start_from,
@@ -148,7 +146,7 @@ def configure_cp_builder_restart(code,
                                     cg=False,
                                     remove_parameters_namelist=[],
                                     cmdline=None,
-                                    structure=None,
+                                    #structure=None, #removed: why is this here??
                                     ttot_ps=None,
                                     stepwalltime_s=None,
                                     print=print,
@@ -182,7 +180,10 @@ def configure_cp_builder_restart(code,
         settings={}
     if resources is not None:
         resources_=resources['resources']
-        queue=     resources['queue']
+        if 'queue' in resources:
+            queue=     resources['queue']
+        else:
+            queue=None
         wallclock= resources['wallclock']
         if 'account' in resources:
             builder.metadata.options.account = resources['account']
@@ -192,10 +193,10 @@ def configure_cp_builder_restart(code,
             builder.metadata.options.account = account
     if not from_scratch:
         #note that the structure will not be used (it has the restart)
-        if structure is None:
-            builder.structure = start_from.inputs.structure
-        else:
-            builder.structure = structure
+        #if structure is None:
+        builder.structure = start_from.inputs.structure
+        #else:
+        #    builder.structure = structure
         builder.parent_folder = start_from.outputs.remote_folder
     else:
         if not cg:
@@ -203,10 +204,10 @@ def configure_cp_builder_restart(code,
         else:
             #copy velocities and starting positions from last step
             last_traj_struct=start_from.outputs.output_trajectory.get_step_structure(-1)
-            if structure is None:
-                new_structure=start_from.inputs.structure.clone()
-            else:
-                new_structure=structure.clone()
+            #if structure is None:
+            new_structure=start_from.inputs.structure.clone()
+            #else:
+            #    new_structure=structure.clone()
             new_structure.cell=last_traj_struct.cell
             new_structure.clear_sites()
             for site in last_traj_struct.sites:
@@ -278,7 +279,8 @@ def configure_cp_builder_restart(code,
     builder.settings = Dict(settings)
     builder.metadata.options.resources = resources_
     builder.metadata.options.max_wallclock_seconds = int(wallclock)
-    builder.metadata.options.queue_name = queue
+    if queue is not None:
+        builder.metadata.options.queue_name = queue
     return builder
 
 
@@ -942,6 +944,7 @@ c,porturrently only the first element of the list is used.
 
     def find_emass_dt(self):
         return not self.inputs.skip_emass_dt_test.value
+
 
     def small_equilibration_cg(self):
         #This is always the first step
