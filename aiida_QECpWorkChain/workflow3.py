@@ -8,14 +8,6 @@ from aiida_quantumespresso.calculations.cp import CpCalculation
 from aiida_quantumespresso.calculations.pw import PwCalculation
 
 
-@aiida_workgraph.task.workfunction(outputs=[{'name':'collected'}])
-def collect_many_results(**many_results):
-    '''
-    remember to increase the link limit with
-    added_task.inputs["force_ratios_arrayw"].link_limit = 50
-    '''
-    return {'collected': many_results}
-
 def link_restart_cp(
     wg: aiida_workgraph.WorkGraph,
     link_from: aiida.orm.CalcJobNode,
@@ -174,23 +166,19 @@ def run_many_pw_on_trajectory(trajectory: aiida.orm.TrajectoryData, n: int,
     compare_forces_many = []
     for i in range(0,n_steps,step):
         new_task = wg.add_task(PwCalculation, kpoints=kpoints, pseudos=pseudos, code=pw_code, structure=trajectory.get_step_structure(i), name=f'pw_on_trajectory_{i}', parameters=parameters, settings=settings, metadata={'options': options})
-        compare_forces_task = wg.add_task(compare_forces, cp_trajectory=trajectory, pw_task=new_task, cp_traj_idx=i)
+        compare_forces_task = wg.add_task(compare_forces, cp_trajectory=trajectory, pw_trajectory=new_task.outputs["output_trajectory"], cp_traj_idx=i)
         compare_forces_many.append(compare_forces_task)
-    #join all the compare_forces tasks together
-    collect_task = wg.add_task(collect_many_results)
-    collect_task.inputs['many_results'].link_limit = 50
-    for i,compare_forces_task in enumerate(compare_forces_many):
-        wg.add_link(compare_forces_task.outputs['forces_ratio'], collect_task.inputs[f"many_results"])
-    collect_task.set_context({'collected': 'force_ratios'}) #NOTE: the order is not intuitive
+        # save the result of compare_forces_task in the context.force_ratios dictionary
+        compare_forces_task.set_context({f'force_ratios.step_{i}': 'result'})
     return wg
     
 #function that compare the forces of the cp and pw calculations
-@aiida_workgraph.task.calcfunction(outputs=[{'name':'forces_ratio'}])
-def compare_forces(cp_trajectory: aiida.orm.TrajectoryData, pw_task: aiida.orm.CalcJobNode, cp_traj_idx: int):
-    cp_forces = cp_trajectory.get_step_data(cp_traj_idx)['forces']
-    pw_forces = pw_task.outputs.output_trajectory.get_step_data(0)['forces']
-    forces_ratio = (np.array(pw_forces)/np.array(cp_forces)).tolist()
-    return {'forces_ratio_array': forces_ratio}
+@aiida_workgraph.task.calcfunction()
+def compare_forces(cp_trajectory: aiida.orm.TrajectoryData, pw_trajectory: aiida.orm.TrajectoryData, cp_traj_idx: int):
+    cp_forces = cp_trajectory.get_array('forces')[cp_traj_idx.value]
+    pw_forces = pw_trajectory.get_array('forces')[0]
+    forces_ratio = aiida.orm.List((np.array(pw_forces)/np.array(cp_forces)).tolist())
+    return forces_ratio
 
 
 @aiida_workgraph.task.calcfunction(outputs=[{'name': 'start_structure','identifier':'workgraph.aiida_structuredata'},{'name': 'start_velocities_A_au'}])
@@ -269,7 +257,6 @@ def build_and_test(code : aiida.orm.Code, pw_code: aiida.orm.Code, pseudo_family
     test_dt_emass_list = [(25.0,2.0),(25.0,5.0), (50.0, 2.0),( 50.0, 5.0)]
     
     #link all the tasks
-    results=[]
     for mu,dt in test_dt_emass_list:
         cp=link_restart_cp(wg, link_from=added_task, metadata=builder_unwrapped['metadata'],pseudos=builder_unwrapped['pseudos'], structure=structure, name=f'test_mu_dt_{mu}_{dt}'.replace('.','d'),nstep=20,code=code,mu=mu, dt=dt) #NOTE: if I start with a number, I have a error from the worker: 'ValueError: invalid link label `25d0_2d0`: not a valid python identifier'. It also cannot start with an underscore
         many_pw_task_wg = wg.add_task(run_many_pw_on_trajectory, trajectory=cp.outputs['output_trajectory'], n=10,
@@ -277,13 +264,9 @@ def build_and_test(code : aiida.orm.Code, pw_code: aiida.orm.Code, pseudo_family
                                       options={
                                             'resources': resources['resources'],    
                                       })
-        results.append(many_pw_task_wg)
-    collect_task = wg.add_task(collect_many_results)
-    collect_task.inputs['many_results'].link_limit = 50
-    #add many links
-    for i,result in enumerate(results):
-        wg.add_link(result.outputs['force_ratios'], collect_task.inputs["many_results"], )
-    collect_task.set_context({'collected': 'force_ratios'})
+        # save the force ratios in the context
+        key = f"{str(mu).replace('.','d')}_{str(dt).replace('.','d')}"
+        many_pw_task_wg.set_context({f'force_ratios.{key}': 'force_ratios'})
     
     return wg
 
