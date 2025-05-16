@@ -53,7 +53,6 @@ import re
 from aiida.engine import submit
 
 from aiida.plugins import DataFactory, WorkflowFactory
-Qecp=WorkflowFactory('qecpworkchain.cp')
 StructureData = DataFactory('core.structure')
 
 aiida_structure_IV = aiida.orm.StructureData(pymatgen_structure=struct_gen_original(what='IV'))
@@ -66,4 +65,4 @@ wg=wf2.build_and_test(code=Code.get_from_string('cp@localhost'),pw_code = Code.g
         'nr3b': 5,
         }
     },dt=6.0,nstep=5,ion_velocities=None)
-wg.run()
+wg.submit()
