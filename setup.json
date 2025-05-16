@@ -19,7 +19,7 @@
         ]
     },
     "include_package_data": true,
-    "setup_requires": ["reentry"],
+    "setup_requires": ["reentry", "six"],
     "reentry_register": true,
     "install_requires": [
         "aiida-core>=2.0.0,<3.0.0",
